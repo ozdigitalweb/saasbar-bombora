@@ -50,7 +50,9 @@ import {
   mascararTelefone,
   normalizarTelefone,
 } from '../src/server/db-services.ts';
-import { generateToken, verifyToken, hashPassword } from '../src/server/auth.ts';
+import { generateToken, verifyToken, hashPassword, getJwtSecret, validateTenantAccess } from '../src/server/auth.ts';
+import { app } from '../src/server/app.ts';
+import http from 'http';
 import { eq, and, desc } from 'drizzle-orm';
 
 interface TestResult {
@@ -3166,7 +3168,7 @@ async function runTestSuite() {
       estabelecimentoId: est14A.id,
       nome: `Garcom Fora Turno ${timestampSec14}`,
       email: `garcom.foraturno.${timestampSec14}@saasbar.com`,
-      senha: 'Password123!',
+      senhaHash: hashSenha14,
       papel: 'garcom',
       celular: '11999990144',
     });
@@ -3188,7 +3190,6 @@ async function runTestSuite() {
     await caixaGarcomService.fechar({
       caixaId: cxFora.id,
       dinheiroDeclarado: 0,
-      fechadoPor: gerente14.id,
       estabelecimentoId: est14A.id,
     });
 
@@ -3941,6 +3942,257 @@ async function runTestSuite() {
     }
   } catch (err: any) {
     console.error('Erro na Seção 15:', err);
+  }
+
+  // ==========================================
+  // SEÇÃO 16: SEGURANÇA & HARDENING DE PRODUÇÃO
+  // ==========================================
+  console.log('\n--- 16. Segurança, Autenticação Global & Hardening ---');
+  try {
+    const server16 = http.createServer(app);
+    await new Promise<void>((resolve) => server16.listen(0, resolve));
+    const port16 = (server16.address() as any).port;
+    const baseUrl16 = `http://127.0.0.1:${port16}/api`;
+
+    const est16A = await estabelecimentoService.create({ nome: `Est Seg A ${prefix}`, tipo: 'bar_casa_noturna' });
+    const est16B = await estabelecimentoService.create({ nome: `Est Seg B ${prefix}`, tipo: 'bar_casa_noturna' });
+
+    const hash16 = await hashPassword('SenhaForte123!');
+    const gerente16A = await usuarioService.create({
+      estabelecimentoId: est16A.id,
+      nome: `Gerente Seg A ${prefix}`,
+      papel: 'gerente',
+      senhaHash: hash16,
+    });
+    const garcom16A = await usuarioService.create({
+      estabelecimentoId: est16A.id,
+      nome: `Garcom Seg A ${prefix}`,
+      papel: 'garcom',
+      senhaHash: hash16,
+    });
+    const gerente16B = await usuarioService.create({
+      estabelecimentoId: est16B.id,
+      nome: `Gerente Seg B ${prefix}`,
+      papel: 'gerente',
+      senhaHash: hash16,
+    });
+
+    const tokenGerenteA = generateToken({
+      userId: gerente16A.id,
+      estabelecimentoId: est16A.id,
+      nome: gerente16A.nome,
+      papel: 'gerente',
+    });
+    const tokenGarcomA = generateToken({
+      userId: garcom16A.id,
+      estabelecimentoId: est16A.id,
+      nome: garcom16A.nome,
+      papel: 'garcom',
+    });
+    const tokenGerenteB = generateToken({
+      userId: gerente16B.id,
+      estabelecimentoId: est16B.id,
+      nome: gerente16B.nome,
+      papel: 'gerente',
+    });
+
+    // 16.1.1: Requisição sem token em rota não pública retorna 401
+    const resNoToken1 = await fetch(`${baseUrl16}/bootstrap`);
+    const statusNoToken1 = resNoToken1.status;
+    if (statusNoToken1 === 401) {
+      record('16.1.1', 'Segurança', 'GET /bootstrap sem token', 'Retorna 401 Unauthorized', 'passou', 'GET /bootstrap sem autenticação bloqueado com HTTP 401.');
+    } else {
+      record('16.1.1', 'Segurança', 'GET /bootstrap sem token', 'Retorna 401', 'falhou', `Status recebido: ${statusNoToken1}`);
+    }
+
+    // 16.1.2: GET /estabelecimentos sem token retorna 401
+    const resNoToken2 = await fetch(`${baseUrl16}/estabelecimentos`);
+    if (resNoToken2.status === 401) {
+      record('16.1.2', 'Segurança', 'GET /estabelecimentos sem token', 'Retorna 401 Unauthorized', 'passou', 'GET /estabelecimentos sem autenticação bloqueado com HTTP 401.');
+    } else {
+      record('16.1.2', 'Segurança', 'GET /estabelecimentos sem token', 'Retorna 401', 'falhou', `Status recebido: ${resNoToken2.status}`);
+    }
+
+    // 16.1.3: POST /usuarios sem token retorna 401
+    const resNoToken3 = await fetch(`${baseUrl16}/usuarios`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ estabelecimentoId: est16A.id, nome: 'Invasor', papel: 'gerente', senha: 'Password123' }),
+    });
+    if (resNoToken3.status === 401) {
+      record('16.1.3', 'Segurança', 'POST /usuarios sem token', 'Retorna 401 Unauthorized', 'passou', 'Cadastro de usuário sem login bloqueado com HTTP 401.');
+    } else {
+      record('16.1.3', 'Segurança', 'POST /usuarios sem token', 'Retorna 401', 'falhou', `Status recebido: ${resNoToken3.status}`);
+    }
+
+    // 16.1.4: Requisição com token inválido retorna 401
+    const resInvalidToken = await fetch(`${baseUrl16}/bootstrap`, {
+      headers: { Authorization: 'Bearer token_totalmente_falso_e_invalido' },
+    });
+    if (resInvalidToken.status === 401) {
+      record('16.1.4', 'Segurança', 'Token inválido', 'Retorna 401 Unauthorized', 'passou', 'Token forjado/inválido rejeitado com HTTP 401.');
+    } else {
+      record('16.1.4', 'Segurança', 'Token inválido', 'Retorna 401', 'falhou', `Status recebido: ${resInvalidToken.status}`);
+    }
+
+    // 16.2.1: Rota pública permitida sem token (GET /status)
+    const resPublicStatus = await fetch(`${baseUrl16}/status`);
+    if (resPublicStatus.status === 200) {
+      record('16.2.1', 'Rotas Públicas', 'GET /status sem token', 'Retorna 200 OK sem exigir login', 'passou', 'Healthcheck público respondeu 200 OK.');
+    } else {
+      record('16.2.1', 'Rotas Públicas', 'GET /status sem token', '200 OK', 'falhou', `Status: ${resPublicStatus.status}`);
+    }
+
+    // 16.2.2: Rota pública de mesa por QR (GET /cliente/mesa-por-qr) sem token
+    const mesa16 = await mesaService.create({
+      estabelecimentoId: est16A.id,
+      identificador: `Mesa 16.2 ${prefix}`,
+      qrCode: `qr_mesa_16_${prefix}`,
+    });
+    const resMesaQr = await fetch(`${baseUrl16}/cliente/mesa-por-qr?qrCode=${mesa16.qrCode}`);
+    if (resMesaQr.status === 200) {
+      record('16.2.2', 'Rotas Públicas', 'GET /cliente/mesa-por-qr sem token', 'Retorna 200 OK localizando mesa pelo QR físico', 'passou', 'Localização de mesa por QR público funcionou sem login.');
+    } else {
+      record('16.2.2', 'Rotas Públicas', 'GET /cliente/mesa-por-qr sem token', '200 OK', 'falhou', `Status: ${resMesaQr.status}`);
+    }
+
+    // 16.3.1: Garçom não acessa rotas de gerente (POST /usuarios retorna 403)
+    const resGarcomUsuarios = await fetch(`${baseUrl16}/usuarios`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenGarcomA}`,
+      },
+      body: JSON.stringify({ estabelecimentoId: est16A.id, nome: 'Tentativa Garcom', papel: 'garcom', senha: 'SenhaValida123' }),
+    });
+    if (resGarcomUsuarios.status === 403) {
+      record('16.3.1', 'Controle de Acesso (RBAC)', 'Garçom tentando criar usuário', 'Retorna 403 Forbidden', 'passou', 'Tentativa de garçom cadastrar usuário bloqueada com HTTP 403.');
+    } else {
+      record('16.3.1', 'Controle de Acesso (RBAC)', 'Garçom criando usuário', '403 Forbidden', 'falhou', `Status: ${resGarcomUsuarios.status}`);
+    }
+
+    // 16.3.2: Garçom não acessa rotas de gerente (POST /mesas retorna 403)
+    const resGarcomMesas = await fetch(`${baseUrl16}/mesas`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenGarcomA}`,
+      },
+      body: JSON.stringify({ estabelecimentoId: est16A.id, identificador: 'Mesa Garcom', qrCode: `qr_g_${prefix}` }),
+    });
+    if (resGarcomMesas.status === 403) {
+      record('16.3.2', 'Controle de Acesso (RBAC)', 'Garçom tentando criar mesa', 'Retorna 403 Forbidden', 'passou', 'Tentativa de garçom criar mesa bloqueada com HTTP 403.');
+    } else {
+      record('16.3.2', 'Controle de Acesso (RBAC)', 'Garçom criando mesa', '403 Forbidden', 'falhou', `Status: ${resGarcomMesas.status}`);
+    }
+
+    // 16.3.3: Garçom não acessa rotas de gerente (GET /relatorios/rateios retorna 403)
+    const resGarcomRelatorio = await fetch(`${baseUrl16}/relatorios/rateios?estabelecimentoId=${est16A.id}`, {
+      headers: { Authorization: `Bearer ${tokenGarcomA}` },
+    });
+    if (resGarcomRelatorio.status === 403) {
+      record('16.3.3', 'Controle de Acesso (RBAC)', 'Garçom tentando ver relatórios', 'Retorna 403 Forbidden', 'passou', 'Acesso de garçom a relatórios restritos de gerente bloqueado com HTTP 403.');
+    } else {
+      record('16.3.3', 'Controle de Acesso (RBAC)', 'Garçom ver relatórios', '403 Forbidden', 'falhou', `Status: ${resGarcomRelatorio.status}`);
+    }
+
+    // 16.4.1: Isolamento multi-tenant: Usuário de A não acessa estabelecimento de B
+    const resCrossTenant1 = await fetch(`${baseUrl16}/estabelecimentos/${est16B.id}`, {
+      headers: { Authorization: `Bearer ${tokenGerenteA}` },
+    });
+    if (resCrossTenant1.status === 403) {
+      record('16.4.1', 'Multi-tenant', 'Gerente A acessando dados do Estabelecimento B', 'Retorna 403 Forbidden', 'passou', 'Acesso cruzado de estabelecimento bloqueado com HTTP 403.');
+    } else {
+      record('16.4.1', 'Multi-tenant', 'Acesso cruzado de estabelecimento', '403 Forbidden', 'falhou', `Status: ${resCrossTenant1.status}`);
+    }
+
+    // 16.4.2: Isolamento multi-tenant: Gerente A não pode criar mesa no Estabelecimento B
+    const resCrossTenant2 = await fetch(`${baseUrl16}/mesas`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenGerenteA}`,
+      },
+      body: JSON.stringify({ estabelecimentoId: est16B.id, identificador: 'Mesa Invasora', qrCode: `qr_inv_${prefix}` }),
+    });
+    if (resCrossTenant2.status === 403) {
+      record('16.4.2', 'Multi-tenant', 'Gerente A cadastrando mesa no Estabelecimento B', 'Retorna 403 Forbidden', 'passou', 'Tentativa de criar recurso em outro tenant bloqueada com HTTP 403.');
+    } else {
+      record('16.4.2', 'Multi-tenant', 'Criar recurso em outro tenant', '403 Forbidden', 'falhou', `Status: ${resCrossTenant2.status}`);
+    }
+
+    // 16.4.3: validateTenantAccess retorna false quando não há usuário autenticado
+    const mockReqNoUser: any = { headers: {} };
+    const accessWithoutAuth = validateTenantAccess(mockReqNoUser, est16A.id);
+    if (accessWithoutAuth === false) {
+      record('16.4.3', 'Multi-tenant', 'validateTenantAccess sem autenticação', 'Retorna false sumariamente', 'passou', 'validateTenantAccess retorna estritamente false na ausência de autenticação.');
+    } else {
+      record('16.4.3', 'Multi-tenant', 'validateTenantAccess sem auth', 'false', 'falhou', `Retornou: ${accessWithoutAuth}`);
+    }
+
+    // 16.5.1: POST /usuarios rejeita senha com menos de 8 caracteres
+    const resShortPassword = await fetch(`${baseUrl16}/usuarios`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenGerenteA}`,
+      },
+      body: JSON.stringify({
+        estabelecimentoId: est16A.id,
+        nome: 'Usuario Senha Curta',
+        papel: 'garcom',
+        senha: '123', // < 8 caracteres
+      }),
+    });
+    if (resShortPassword.status === 400) {
+      record('16.5.1', 'Hardening de Senhas', 'POST /usuarios com senha < 8 caracteres', 'Retorna 400 Bad Request exigindo mínimo de 8 caracteres', 'passou', 'Senha fraca/curta rejeitada com HTTP 400.');
+    } else {
+      record('16.5.1', 'Hardening de Senhas', 'Senha < 8 caracteres', '400 Bad Request', 'falhou', `Status: ${resShortPassword.status}`);
+    }
+
+    // 16.5.2: POST /usuarios cria usuário com sucesso quando senha >= 8 caracteres
+    const resGoodPassword = await fetch(`${baseUrl16}/usuarios`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenGerenteA}`,
+      },
+      body: JSON.stringify({
+        estabelecimentoId: est16A.id,
+        nome: `Usuario Valido ${prefix}`,
+        papel: 'garcom',
+        senha: 'SenhaSegura123!',
+      }),
+    });
+    if (resGoodPassword.status === 201) {
+      record('16.5.2', 'Hardening de Senhas', 'POST /usuarios com senha >= 8 caracteres', 'Retorna 201 Created com sucesso', 'passou', 'Usuário cadastrado com sucesso após validação de senha.');
+    } else {
+      record('16.5.2', 'Hardening de Senhas', 'Senha válida', '201 Created', 'falhou', `Status: ${resGoodPassword.status}`);
+    }
+
+    // 16.6.1: JWT_SECRET em produção recusa se < 32 caracteres ou ausente
+    const oldEnvSecret = process.env.JWT_SECRET;
+    const oldNodeEnv = process.env.NODE_ENV;
+    let prodSecretThrew = false;
+    try {
+      process.env.NODE_ENV = 'production';
+      process.env.JWT_SECRET = 'curto_demais';
+      getJwtSecret();
+    } catch (e: any) {
+      prodSecretThrew = true;
+    } finally {
+      process.env.NODE_ENV = oldNodeEnv;
+      process.env.JWT_SECRET = oldEnvSecret;
+    }
+    if (prodSecretThrew) {
+      record('16.6.1', 'Hardening de Ambiente', 'getJwtSecret em produção sem secret seguro (>=32 chars)', 'Lança exceção fatal impedindo inicialização', 'passou', 'Servidor recusa inicializar em produção quando JWT_SECRET é inseguro ou ausente.');
+    } else {
+      record('16.6.1', 'Hardening de Ambiente', 'getJwtSecret em produção', 'Lança exceção', 'falhou', 'Não lançou exceção');
+    }
+
+    server16.close();
+  } catch (err: any) {
+    console.error('Erro na Seção 16:', err);
   }
 
   console.log('\n====================================================');

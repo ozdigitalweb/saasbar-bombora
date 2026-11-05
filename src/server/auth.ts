@@ -2,7 +2,31 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { Request, Response, NextFunction } from 'express';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'saasbar_jwt_secure_secret_2026';
+import crypto from 'crypto';
+
+// Segredo efêmero aleatório gerado em tempo de execução para dev/testes quando JWT_SECRET não estiver no ambiente.
+// Garante que nenhum valor padrão fixo/hardcoded exista no código-fonte.
+const DEV_FALLBACK_SECRET = crypto.randomBytes(32).toString('hex');
+
+export function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  if (isProduction) {
+    if (!secret || secret.trim().length < 32) {
+      const msg = 'FATAL: Em ambiente de produção, JWT_SECRET é obrigatório e deve ter no mínimo 32 caracteres.';
+      console.error(msg);
+      throw new Error(msg);
+    }
+    return secret.trim();
+  }
+
+  if (secret && secret.trim().length >= 8) {
+    return secret.trim();
+  }
+
+  return DEV_FALLBACK_SECRET;
+}
 
 export interface TokenPayload {
   userId: string;
@@ -29,12 +53,12 @@ export async function comparePassword(plainText: string, hash: string): Promise<
 }
 
 export function generateToken(payload: TokenPayload): string {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign(payload, getJwtSecret(), { expiresIn: '7d' });
 }
 
 export function verifyToken(token: string): TokenPayload | null {
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as TokenPayload;
+    const payload = jwt.verify(token, getJwtSecret()) as TokenPayload;
     if (payload && payload.userId && !payload.id) {
       payload.id = payload.userId;
     }
@@ -86,15 +110,15 @@ export function getCallerTenantId(req: Request): string | null {
 
 /**
  * Validates if a resource belongs to the caller's establishment (multi-tenant enforcement).
- * Returns true if allowed, false if tenant mismatch.
+ * Requisito 3: Retorna false quando não há usuário autenticado nas rotas não públicas.
  */
 export function validateTenantAccess(
   req: Request,
   resourceEstabelecimentoId: string | null | undefined
 ): boolean {
   const callerEstId = getCallerTenantId(req);
-  if (!callerEstId) return true; // not authenticated or public endpoint
-  if (!resourceEstabelecimentoId) return true;
+  if (!callerEstId) return false;
+  if (!resourceEstabelecimentoId) return false;
   return callerEstId === resourceEstabelecimentoId;
 }
 

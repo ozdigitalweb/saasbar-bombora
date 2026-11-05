@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { app } from './src/server/app.ts';
+import { getJwtSecret } from './src/server/auth.ts';
 
 dotenv.config();
 
@@ -12,6 +13,9 @@ const isProd = process.env.NODE_ENV === 'production';
 const port = Number(process.env.PORT) || 3000;
 
 async function startServer() {
+  // Validação estrita de segurança no início do servidor (Requisito 5)
+  getJwtSecret();
+
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({

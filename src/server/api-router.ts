@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import {
   estabelecimentoService,
   pontoDePreparoService,
@@ -28,6 +28,7 @@ import {
   hashPassword,
   comparePassword,
   generateToken,
+  verifyToken,
   requireAuth,
   requireRole,
   validateTenantAccess,
@@ -43,6 +44,55 @@ import {
 } from './rate-limiter.ts';
 
 export const apiRouter = Router();
+
+// ==========================================
+// LISTA EXPLÍCITA DE ROTAS PÚBLICAS & RATE LIMITING
+// ==========================================
+// 1. POST /auth/login: login da equipe (garçom, operador, gerente) com loginRateLimiter
+// 2. GET /status: healthcheck de monitoramento do servidor
+// 3. GET /cliente/mesa-por-qr: cliente escaneia o QR físico da mesa para identificar mesa/comanda
+// 4. POST /cliente/solicitar-codigo: cliente solicita código OTP de 6 dígitos via SMS/WhatsApp
+// 5. POST /cliente/verificar-codigo: cliente valida o código de 6 dígitos digitado
+// 6. GET /cliente/sessao-mesa: cliente consulta se a sessão da mesa já está verificada
+// 7. POST /cliente/pedido: envio de pedido pelo cliente na mesa (autoatendimento com rate limit)
+// 8. POST /pedidos/lancamento-rapido: envio de pedido pelo cliente quando origem === 'autoatendimento'
+export function isPublicRoute(method: string, path: string, body?: any): boolean {
+  const m = method.toUpperCase();
+  const p = path.replace(/\/+$/, '') || '/';
+
+  if (m === 'POST' && p === '/auth/login') return true;
+  if (m === 'GET' && p === '/status') return true;
+  if (m === 'GET' && p === '/cliente/mesa-por-qr') return true;
+  if (m === 'POST' && p === '/cliente/solicitar-codigo') return true;
+  if (m === 'POST' && p === '/cliente/verificar-codigo') return true;
+  if (m === 'GET' && p === '/cliente/sessao-mesa') return true;
+  if (m === 'POST' && p === '/cliente/pedido') return true;
+  if (m === 'POST' && p === '/pedidos/lancamento-rapido' && body?.origem === 'autoatendimento') {
+    return true;
+  }
+  return false;
+}
+
+// ==========================================
+// MIDDLEWARE GLOBAL DE AUTENTICAÇÃO POR PADRÃO
+// (Exige autenticação em todas as rotas exceto a lista explícita acima)
+// ==========================================
+apiRouter.use((req: Request, res: Response, next: NextFunction) => {
+  if (isPublicRoute(req.method, req.path, req.body)) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      const decoded = verifyToken(token);
+      if (decoded) {
+        (req as AuthRequest).user = decoded;
+      }
+    }
+    return next();
+  }
+
+  // Qualquer rota não pública sem autenticação válida é rejeitada com 401
+  requireAuth(req as AuthRequest, res, next);
+});
 
 // ==========================================
 // AUTHENTICATION (Login com Celular/Email + Senha)
@@ -113,15 +163,14 @@ apiRouter.get('/status', (req: Request, res: Response) => {
 
 apiRouter.get('/bootstrap', async (req: Request, res: Response) => {
   try {
-    const estabelecimentos = await estabelecimentoService.getAll();
-    let current = estabelecimentos[0] || null;
+    const callerEstId = getCallerTenantId(req);
+    if (!callerEstId) {
+      return res.status(401).json({ error: 'Usuário não autenticado ou sem estabelecimento' });
+    }
+
+    const current = await estabelecimentoService.getById(callerEstId);
     if (!current) {
-      // create default if none
-      current = await estabelecimentoService.create({
-        nome: 'Bombora Beach Bar & Lounge',
-        tipo: 'bar_casa_noturna',
-        config: { descricao: 'Piloto Bombora' },
-      });
+      return res.status(404).json({ error: 'Estabelecimento do usuário não encontrado' });
     }
 
     const [pontos, usuarios, mesas, pulseiras, clientes, itens, eventos, activeEvento] =
@@ -143,7 +192,7 @@ apiRouter.get('/bootstrap', async (req: Request, res: Response) => {
     }
 
     res.json({
-      estabelecimentos,
+      estabelecimentos: [current],
       currentEstabelecimento: current,
       eventos,
       activeEvento,
@@ -165,31 +214,35 @@ apiRouter.get('/bootstrap', async (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 1. ESTABELECIMENTO CRUD
+// 1. ESTABELECIMENTO CRUD (SÓ GERENTE)
 // ==========================================
-apiRouter.get('/estabelecimentos', async (req: Request, res: Response) => {
+apiRouter.get('/estabelecimentos', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
-    const list = await estabelecimentoService.getAll();
-    res.json(list);
+    const callerEstId = getCallerTenantId(req);
+    if (!callerEstId) {
+      return res.status(401).json({ error: 'Não autenticado' });
+    }
+    const current = await estabelecimentoService.getById(callerEstId);
+    res.json(current ? [current] : []);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Erro ao listar estabelecimentos' });
   }
 });
 
-apiRouter.get('/estabelecimentos/:id', async (req: Request, res: Response) => {
+apiRouter.get('/estabelecimentos/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
+    if (!validateTenantAccess(req, req.params.id)) {
+      return res.status(403).json({ error: 'Acesso negado: estabelecimento pertence a outro tenant.' });
+    }
     const item = await estabelecimentoService.getById(req.params.id);
     if (!item) return res.status(404).json({ error: 'Estabelecimento não encontrado' });
-    if (!validateTenantAccess(req, item.id)) {
-      return res.status(403).json({ error: 'Acesso negado: recurso pertence a outro estabelecimento.' });
-    }
     res.json(item);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Erro ao buscar estabelecimento' });
   }
 });
 
-apiRouter.post('/estabelecimentos', requireAuth, requireRole(['gerente']), async (req: Request, res: Response) => {
+apiRouter.post('/estabelecimentos', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { nome, tipo, config } = req.body;
     if (!nome?.trim()) {
@@ -263,7 +316,7 @@ apiRouter.get('/pontos-de-preparo/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/pontos-de-preparo', async (req: Request, res: Response) => {
+apiRouter.post('/pontos-de-preparo', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { estabelecimentoId, nome } = req.body;
     if (!estabelecimentoId || !nome?.trim()) {
@@ -282,7 +335,7 @@ apiRouter.post('/pontos-de-preparo', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/pontos-de-preparo/:id', async (req: Request, res: Response) => {
+apiRouter.put('/pontos-de-preparo/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await pontoDePreparoService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Ponto de preparo não encontrado' });
@@ -300,7 +353,7 @@ apiRouter.put('/pontos-de-preparo/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/pontos-de-preparo/:id', async (req: Request, res: Response) => {
+apiRouter.delete('/pontos-de-preparo/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await pontoDePreparoService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Ponto de preparo não encontrado' });
@@ -315,12 +368,13 @@ apiRouter.delete('/pontos-de-preparo/:id', async (req: Request, res: Response) =
 });
 
 // ==========================================
-// 3. USUARIO CRUD (papéis: garcom, gerente, operador_balcao)
+// 3. USUARIO CRUD (SÓ GERENTE)
 // ==========================================
-apiRouter.get('/usuarios', async (req: Request, res: Response) => {
+apiRouter.get('/usuarios', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { estabelecimentoId, papel } = req.query;
-    const targetEst = typeof estabelecimentoId === 'string' ? estabelecimentoId : undefined;
+    const callerEstId = getCallerTenantId(req);
+    const targetEst = typeof estabelecimentoId === 'string' ? estabelecimentoId : callerEstId || undefined;
     if (targetEst && !validateTenantAccess(req, targetEst)) {
       return res.status(403).json({ error: 'Acesso negado: recurso pertence a outro estabelecimento.' });
     }
@@ -334,7 +388,7 @@ apiRouter.get('/usuarios', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.get('/usuarios/:id', async (req: Request, res: Response) => {
+apiRouter.get('/usuarios/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const item = await usuarioService.getById(req.params.id);
     if (!item) return res.status(404).json({ error: 'Usuário não encontrado' });
@@ -347,7 +401,7 @@ apiRouter.get('/usuarios/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/usuarios', async (req: Request, res: Response) => {
+apiRouter.post('/usuarios', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { estabelecimentoId, nome, papel, celular, email, senha, senhaHash } = req.body;
     if (!estabelecimentoId || !nome?.trim() || !papel) {
@@ -362,8 +416,13 @@ apiRouter.post('/usuarios', async (req: Request, res: Response) => {
         error: `Papel inválido. Deve ser um de: ${validPapels.join(', ')}`,
       });
     }
-    const rawPassword = senha || senhaHash || '123456';
-    const hashed = await hashPassword(rawPassword);
+
+    // Regra 6: Senha obrigatória, mínimo de 8 caracteres; sem padrão '123456'
+    const rawPassword = senha || senhaHash;
+    if (!rawPassword || typeof rawPassword !== 'string' || rawPassword.trim().length < 8) {
+      return res.status(400).json({ error: 'A senha é obrigatória e deve ter no mínimo 8 caracteres.' });
+    }
+    const hashed = await hashPassword(rawPassword.trim());
 
     const created = await usuarioService.create({
       estabelecimentoId,
@@ -379,7 +438,7 @@ apiRouter.post('/usuarios', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/usuarios/:id', async (req: Request, res: Response) => {
+apiRouter.put('/usuarios/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await usuarioService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Usuário não encontrado' });
@@ -395,9 +454,13 @@ apiRouter.put('/usuarios/:id', async (req: Request, res: Response) => {
         });
       }
     }
-    let finalSenhaHash: string | undefined = senhaHash;
-    if (senha) {
-      finalSenhaHash = await hashPassword(senha);
+    let finalSenhaHash: string | undefined = undefined;
+    const rawNewPassword = senha || senhaHash;
+    if (rawNewPassword !== undefined) {
+      if (typeof rawNewPassword !== 'string' || rawNewPassword.trim().length < 8) {
+        return res.status(400).json({ error: 'A nova senha deve ter no mínimo 8 caracteres.' });
+      }
+      finalSenhaHash = await hashPassword(rawNewPassword.trim());
     }
     const updated = await usuarioService.update(req.params.id, {
       ...(nome ? { nome: nome.trim() } : {}),
@@ -412,7 +475,7 @@ apiRouter.put('/usuarios/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/usuarios/:id', async (req: Request, res: Response) => {
+apiRouter.delete('/usuarios/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await usuarioService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Usuário não encontrado' });
@@ -456,7 +519,7 @@ apiRouter.get('/mesas/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/mesas', async (req: Request, res: Response) => {
+apiRouter.post('/mesas', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { estabelecimentoId, identificador, qrCode, status } = req.body;
     if (!estabelecimentoId || !identificador?.trim() || !qrCode?.trim()) {
@@ -479,7 +542,7 @@ apiRouter.post('/mesas', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/mesas/:id', async (req: Request, res: Response) => {
+apiRouter.put('/mesas/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await mesaService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Mesa não encontrada' });
@@ -498,7 +561,7 @@ apiRouter.put('/mesas/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/mesas/:id', async (req: Request, res: Response) => {
+apiRouter.delete('/mesas/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await mesaService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Mesa não encontrada' });
@@ -542,7 +605,7 @@ apiRouter.get('/pulseiras/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/pulseiras', async (req: Request, res: Response) => {
+apiRouter.post('/pulseiras', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { estabelecimentoId, codigoQr } = req.body;
     if (!estabelecimentoId || !codigoQr?.trim()) {
@@ -563,7 +626,7 @@ apiRouter.post('/pulseiras', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/pulseiras/:id', async (req: Request, res: Response) => {
+apiRouter.put('/pulseiras/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await pulseiraService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Pulseira não encontrada' });
@@ -583,7 +646,7 @@ apiRouter.put('/pulseiras/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/pulseiras/:id', async (req: Request, res: Response) => {
+apiRouter.delete('/pulseiras/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await pulseiraService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Pulseira não encontrada' });
@@ -672,7 +735,7 @@ apiRouter.put('/clientes/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/clientes/:id', async (req: Request, res: Response) => {
+apiRouter.delete('/clientes/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await clienteService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Cliente não encontrado' });
@@ -716,7 +779,7 @@ apiRouter.get('/itens-cardapio/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/itens-cardapio', async (req: Request, res: Response) => {
+apiRouter.post('/itens-cardapio', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { estabelecimentoId, pontoDePreparoId, nome, preco } = req.body;
     if (!estabelecimentoId || !pontoDePreparoId || !nome?.trim() || preco === undefined) {
@@ -743,7 +806,7 @@ apiRouter.post('/itens-cardapio', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/itens-cardapio/:id', async (req: Request, res: Response) => {
+apiRouter.put('/itens-cardapio/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await itemCardapioService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Item de cardápio não encontrado' });
@@ -766,7 +829,7 @@ apiRouter.put('/itens-cardapio/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/itens-cardapio/:id', async (req: Request, res: Response) => {
+apiRouter.delete('/itens-cardapio/:id', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await itemCardapioService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Item de cardápio não encontrado' });
@@ -815,7 +878,7 @@ apiRouter.get('/eventos/ativo', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/eventos', async (req: Request, res: Response) => {
+apiRouter.post('/eventos', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { estabelecimentoId, nome, dataInicio, modoRebalanceamento } = req.body;
     if (!estabelecimentoId || !nome?.trim()) {
@@ -836,7 +899,7 @@ apiRouter.post('/eventos', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/eventos/:id/encerrar', async (req: Request, res: Response) => {
+apiRouter.put('/eventos/:id/encerrar', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await eventoService.getById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Evento não encontrado' });
@@ -994,7 +1057,7 @@ apiRouter.get('/comandas/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/comandas', async (req: Request, res: Response) => {
+apiRouter.post('/comandas', requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const { eventoId, tipoAtendimento, vinculoPulseiraEventoId, mesaId, garcomResponsavelId } = req.body;
     if (!eventoId || !tipoAtendimento) {
@@ -1025,7 +1088,7 @@ apiRouter.post('/comandas', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/comandas/:id/status', async (req: Request, res: Response) => {
+apiRouter.put('/comandas/:id/status', requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const cmd = await comandaService.getById(req.params.id);
     if (!cmd) return res.status(404).json({ error: 'Comanda não encontrada' });
@@ -1129,8 +1192,7 @@ apiRouter.get('/cliente/sessao-mesa', autoatendimentoRateLimiter, async (req: Re
   }
 });
 
-// Lançamento rápido de pedidos (Balcão e Autoatendimento)
-apiRouter.post('/pedidos/lancamento-rapido', autoatendimentoRateLimiter, async (req: Request, res: Response) => {
+const handleLancamentoRapido = async (req: Request, res: Response) => {
   try {
     const {
       comandaId,
@@ -1149,8 +1211,19 @@ apiRouter.post('/pedidos/lancamento-rapido', autoatendimentoRateLimiter, async (
 
     const cmd = await comandaService.getById(comandaId);
     if (!cmd) return res.status(404).json({ error: 'Comanda não encontrada' });
-    if (!validateTenantAccess(req, cmd.estabelecimentoId)) {
-      return res.status(403).json({ error: 'Acesso negado: recurso pertence a outro estabelecimento.' });
+
+    if (origem !== 'autoatendimento') {
+      const callerUser = (req as AuthRequest).user;
+      if (!callerUser) {
+        return res.status(401).json({ error: 'Não autenticado' });
+      }
+      const allowed = ['garcom', 'gerente', 'operador_balcao'];
+      if (!allowed.includes(callerUser.papel)) {
+        return res.status(403).json({ error: `Acesso negado para o papel "${callerUser.papel}".` });
+      }
+      if (!validateTenantAccess(req, cmd.estabelecimentoId)) {
+        return res.status(403).json({ error: 'Acesso negado: recurso pertence a outro estabelecimento.' });
+      }
     }
 
     let telVerificado = false;
@@ -1193,10 +1266,19 @@ apiRouter.post('/pedidos/lancamento-rapido', autoatendimentoRateLimiter, async (
 
     res.status(201).json(resultado);
   } catch (error: any) {
-    console.error('Erro no lançamento rápido:', error);
-    res.status(500).json({ error: error.message || 'Erro ao lançar pedido no balcão' });
+    console.error('Erro no lançamento de pedido:', error);
+    res.status(500).json({ error: error.message || 'Erro ao lançar pedido' });
   }
+};
+
+// Rota pública para envio de pedido pelo cliente via autoatendimento (mesa QR)
+apiRouter.post('/cliente/pedido', autoatendimentoRateLimiter, async (req: Request, res: Response) => {
+  req.body = { ...req.body, origem: 'autoatendimento' };
+  return handleLancamentoRapido(req, res);
 });
+
+// Lançamento rápido de pedidos (Balcão e Autoatendimento)
+apiRouter.post('/pedidos/lancamento-rapido', autoatendimentoRateLimiter, handleLancamentoRapido);
 
 // Validação de pedido de mesa pelo garçom (com ou sem confirmação presencial de telefone)
 apiRouter.post('/pedidos/:id/validar', requireAuth, requireRole(['garcom', 'gerente', 'operador_balcao']), async (req: Request, res: Response) => {
@@ -1271,7 +1353,7 @@ apiRouter.get('/pedidos/aguardando-validacao', requireAuth, async (req: Request,
 
 // Tela de depuração do gerente: visualização dos códigos simulados enviados recentemente
 // Regra: Tela de depuração e log de códigos desativados quando houver provedor real ou em produção
-apiRouter.get('/debug/ultimos-codigos-sms', requireAuth, requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
+apiRouter.get('/debug/ultimos-codigos-sms', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     if (!envioCodigoService.isDepuracaoAtiva()) {
       return res.json({
@@ -1348,7 +1430,7 @@ apiRouter.get('/kds/fila', async (req: Request, res: Response) => {
 // ==========================================
 // 12. FECHAMENTO & RATEIO DE CONTAS
 // ==========================================
-apiRouter.get('/comandas/:id/previa-fechamento', async (req: Request, res: Response) => {
+apiRouter.get('/comandas/:id/previa-fechamento', requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const cmd = await comandaService.getById(req.params.id);
     if (!cmd) return res.status(404).json({ error: 'Comanda não encontrada' });
@@ -1363,7 +1445,7 @@ apiRouter.get('/comandas/:id/previa-fechamento', async (req: Request, res: Respo
   }
 });
 
-apiRouter.post('/comandas/:id/fechar-pagamento', async (req: Request, res: Response) => {
+apiRouter.post('/comandas/:id/fechar-pagamento', requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const cmd = await comandaService.getById(req.params.id);
     if (!cmd) return res.status(404).json({ error: 'Comanda não encontrada' });
@@ -1432,7 +1514,7 @@ apiRouter.post('/comandas/:id/fechar-pagamento', async (req: Request, res: Respo
   }
 });
 
-apiRouter.post('/comandas/:id/recibo-whatsapp', async (req: Request, res: Response) => {
+apiRouter.post('/comandas/:id/recibo-whatsapp', requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const cmd = await comandaService.getById(req.params.id);
     if (!cmd) return res.status(404).json({ error: 'Comanda não encontrada' });
@@ -1447,7 +1529,7 @@ apiRouter.post('/comandas/:id/recibo-whatsapp', async (req: Request, res: Respon
   }
 });
 
-apiRouter.get('/relatorios/rateios', requireAuth, requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
+apiRouter.get('/relatorios/rateios', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { estabelecimentoId, eventoId } = req.query;
     if (!estabelecimentoId || typeof estabelecimentoId !== 'string') {
@@ -1473,7 +1555,7 @@ apiRouter.get('/relatorios/rateios', requireAuth, requireRole(['gerente', 'opera
 // ==========================================
 
 // Registrar cobrança manual avulsa/direta
-apiRouter.post('/cobrancas/registrar-manual', async (req: Request, res: Response) => {
+apiRouter.post('/cobrancas/registrar-manual', requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const { comandaId, metodo, tipoContribuicao, valorContribuicao, valorRecebido, bandeira, nsu, idempotencyKey, garcomId } = req.body;
     if (!comandaId) return res.status(400).json({ error: 'comandaId é obrigatório' });
@@ -1610,7 +1692,7 @@ apiRouter.post('/caixas-garcom/:id/sangria', requireAuth, requireRole(['gerente'
 });
 
 // Fechar caixa do garçom (garçom declara dinheiro)
-apiRouter.post('/caixas-garcom/:id/fechar', async (req: Request, res: Response) => {
+apiRouter.post('/caixas-garcom/:id/fechar', requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const { dinheiroDeclarado } = req.body;
     if (dinheiroDeclarado === undefined || dinheiroDeclarado === null) {
@@ -1728,8 +1810,8 @@ const handleBuscarPorCelular = async (req: Request, res: Response) => {
   }
 };
 
-apiRouter.get('/pulseiras-perdidas/buscar-por-celular', buscaCelularRateLimiter, handleBuscarPorCelular);
-apiRouter.post('/pulseiras-perdidas/buscar-por-celular', buscaCelularRateLimiter, handleBuscarPorCelular);
+apiRouter.get('/pulseiras-perdidas/buscar-por-celular', requireRole(['gerente', 'operador_balcao']), buscaCelularRateLimiter, handleBuscarPorCelular);
+apiRouter.post('/pulseiras-perdidas/buscar-por-celular', requireRole(['gerente', 'operador_balcao']), buscaCelularRateLimiter, handleBuscarPorCelular);
 
 // 13.2 Iniciar tolerância de 30 minutos (Idempotente, valida tenant/evento, grava horário do servidor e audita)
 const handleIniciarToleranciaPerda = async (req: Request, res: Response) => {
@@ -1768,10 +1850,10 @@ const handleIniciarToleranciaPerda = async (req: Request, res: Response) => {
   }
 };
 
-apiRouter.post('/pulseiras-perdidas/iniciar-tolerancia', handleIniciarToleranciaPerda);
-apiRouter.post('/pulseiras-perdidas/comunicar', handleIniciarToleranciaPerda);
+apiRouter.post('/pulseiras-perdidas/iniciar-tolerancia', requireRole(['gerente', 'operador_balcao']), handleIniciarToleranciaPerda);
+apiRouter.post('/pulseiras-perdidas/comunicar', requireRole(['gerente', 'operador_balcao']), handleIniciarToleranciaPerda);
 
-apiRouter.get('/pulseiras-perdidas/calculo/:vinculoId', async (req: Request, res: Response) => {
+apiRouter.get('/pulseiras-perdidas/calculo/:vinculoId', requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const vinc = await vinculoPulseiraService.getById(req.params.vinculoId);
     if (!vinc) return res.status(404).json({ error: 'Nenhum registro de vínculo encontrado' });
@@ -1787,7 +1869,7 @@ apiRouter.get('/pulseiras-perdidas/calculo/:vinculoId', async (req: Request, res
   }
 });
 
-apiRouter.get('/pulseiras-perdidas', async (req: Request, res: Response) => {
+apiRouter.get('/pulseiras-perdidas', requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const { eventoId } = req.query;
     if (eventoId && typeof eventoId === 'string') {
@@ -1807,7 +1889,7 @@ apiRouter.get('/pulseiras-perdidas', async (req: Request, res: Response) => {
 // ==========================================
 // 14. SISTEMA DE FIDELIDADE DE DUAS ESTRELAS
 // ==========================================
-apiRouter.get('/fidelidade/ranking', async (req: Request, res: Response) => {
+apiRouter.get('/fidelidade/ranking', requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const { estabelecimentoId } = req.query;
     if (!estabelecimentoId || typeof estabelecimentoId !== 'string') {
@@ -1839,7 +1921,7 @@ apiRouter.get('/fidelidade/cliente/:clienteId', async (req: Request, res: Respon
   }
 });
 
-apiRouter.post('/fidelidade/resgatar-chopp/:clienteId', async (req: Request, res: Response) => {
+apiRouter.post('/fidelidade/resgatar-chopp/:clienteId', requireRole(['gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const cli = await clienteService.getById(req.params.clienteId);
     if (!cli) return res.status(404).json({ error: 'Cliente não encontrado' });
@@ -1855,9 +1937,9 @@ apiRouter.post('/fidelidade/resgatar-chopp/:clienteId', async (req: Request, res
 });
 
 // ==========================================
-// 15. REBALANCEAMENTO & COMISSÃO DE GARÇONS
+// 15. REBALANCEAMENTO & COMISSÃO DE GARÇONS (SÓ GERENTE)
 // ==========================================
-apiRouter.get('/equipe/rebalanceamento', async (req: Request, res: Response) => {
+apiRouter.get('/equipe/rebalanceamento', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { eventoId, estabelecimentoId } = req.query;
     if (!eventoId || !estabelecimentoId) {
@@ -1877,7 +1959,7 @@ apiRouter.get('/equipe/rebalanceamento', async (req: Request, res: Response) => 
   }
 });
 
-apiRouter.post('/equipe/atribuir-mesa', async (req: Request, res: Response) => {
+apiRouter.post('/equipe/atribuir-mesa', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { garcomId, mesaId } = req.body;
     if (!garcomId || !mesaId) return res.status(400).json({ error: 'garcomId e mesaId são obrigatórios' });
@@ -1894,7 +1976,7 @@ apiRouter.post('/equipe/atribuir-mesa', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/equipe/remover-mesa', async (req: Request, res: Response) => {
+apiRouter.delete('/equipe/remover-mesa', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { garcomId, mesaId } = req.body;
     if (!garcomId || !mesaId) return res.status(400).json({ error: 'garcomId e mesaId são obrigatórios' });
@@ -1911,7 +1993,7 @@ apiRouter.delete('/equipe/remover-mesa', async (req: Request, res: Response) => 
   }
 });
 
-apiRouter.post('/equipe/meta-comissao', async (req: Request, res: Response) => {
+apiRouter.post('/equipe/meta-comissao', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { garcomId, eventoId, metaMinutos, comissaoBase, bonus } = req.body;
     if (!garcomId || !eventoId) return res.status(400).json({ error: 'garcomId e eventoId são obrigatórios' });
@@ -1934,7 +2016,7 @@ apiRouter.post('/equipe/meta-comissao', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/equipe/executar-rebalanceamento', async (req: Request, res: Response) => {
+apiRouter.post('/equipe/executar-rebalanceamento', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { eventoId, estabelecimentoId } = req.body;
     if (!eventoId || !estabelecimentoId) {
@@ -1959,7 +2041,7 @@ apiRouter.post('/equipe/executar-rebalanceamento', async (req: Request, res: Res
 // ==========================================
 
 // 17.1 Busca de cliente por celular (com estrelas de fidelidade e saudação)
-apiRouter.get('/garcom/clientes/buscar', async (req: Request, res: Response) => {
+apiRouter.get('/garcom/clientes/buscar', requireRole(['garcom', 'gerente']), async (req: Request, res: Response) => {
   try {
     const { celular, estabelecimentoId } = req.query;
     if (!celular || typeof celular !== 'string') {
@@ -1993,7 +2075,7 @@ apiRouter.get('/garcom/clientes/buscar', async (req: Request, res: Response) => 
 });
 
 // 17.2 Check-in do cliente + pulseira física (vinculação ao evento)
-apiRouter.post('/garcom/check-in-pulseira', async (req: Request, res: Response) => {
+apiRouter.post('/garcom/check-in-pulseira', requireRole(['garcom', 'gerente']), async (req: Request, res: Response) => {
   try {
     const { clienteId, nome, celular, estabelecimentoId, codigoQrPulseira, eventoId, mesaId, garcomId } = req.body;
 
@@ -2078,8 +2160,8 @@ apiRouter.post('/garcom/check-in-pulseira', async (req: Request, res: Response) 
   }
 });
 
-// 17.3 Liberar mesa para a sessão inteira
-apiRouter.post('/garcom/mesas/liberar', async (req: Request, res: Response) => {
+// 17.3 Liberar mesa para a sessão inteira (Apenas Gerente - botão removido do garçom)
+apiRouter.post('/garcom/mesas/liberar', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
     const { mesaId, eventoId, garcomId } = req.body;
     if (!mesaId || !eventoId) {
@@ -2115,7 +2197,7 @@ apiRouter.post('/garcom/mesas/liberar', async (req: Request, res: Response) => {
 });
 
 // 17.4 Fila de entrega do garçom (itens prontos aguardando retirada)
-apiRouter.get('/garcom/fila-entrega', async (req: Request, res: Response) => {
+apiRouter.get('/garcom/fila-entrega', requireRole(['garcom', 'gerente']), async (req: Request, res: Response) => {
   try {
     const { eventoId, garcomId } = req.query;
     const items = await pedidoService.getFilaEntregaGarcom(
@@ -2130,7 +2212,7 @@ apiRouter.get('/garcom/fila-entrega', async (req: Request, res: Response) => {
 });
 
 // 17.5 Garçom marca "Recebi" (transiciona de 'pronto' para 'visto' com timestamp vistoEm)
-apiRouter.post('/garcom/fila-entrega/:itemId/recebi', async (req: Request, res: Response) => {
+apiRouter.post('/garcom/fila-entrega/:itemId/recebi', requireRole(['garcom', 'gerente']), async (req: Request, res: Response) => {
   try {
     const existing = await pedidoService.getItemById(req.params.itemId);
     if (!existing) return res.status(404).json({ error: 'Item não encontrado.' });
@@ -2148,7 +2230,7 @@ apiRouter.post('/garcom/fila-entrega/:itemId/recebi', async (req: Request, res: 
 });
 
 // 17.6 Perfil do garçom (desempenho individual, meta de tempo e comissão acumulada)
-apiRouter.get('/garcom/perfil/:garcomId', async (req: Request, res: Response) => {
+apiRouter.get('/garcom/perfil/:garcomId', requireRole(['garcom', 'gerente', 'operador_balcao']), async (req: Request, res: Response) => {
   try {
     const garcom = await usuarioService.getById(req.params.garcomId);
     if (!garcom) return res.status(404).json({ error: 'Garçom não encontrado' });

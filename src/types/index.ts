@@ -130,7 +130,7 @@ export interface PedidoDetail {
   telefoneVerificado?: boolean;
   confirmadoPresencialmente?: boolean;
   verificacaoMetodo?: 'sms' | 'whatsapp' | 'presencial';
-  statusValidacao?: 'pendente' | 'validado' | 'recusado';
+  statusValidacao?: 'aguardando_validacao' | 'pendente' | 'validado' | 'recusado';
   itens: PedidoItemDetail[];
 }
 
