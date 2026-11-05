@@ -1,0 +1,6 @@
+{
+  "name": "SAASBAR - Gestão de Bares",
+  "description": "Sistema de gestão de pedidos e controle operacional para bares, casas noturnas e eventos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
