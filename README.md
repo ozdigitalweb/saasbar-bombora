@@ -198,7 +198,7 @@ Apenas os endpoints estritamente necessários para o autoatendimento anônimo do
 │   ├── App.tsx                   # Roteamento visual da aplicação
 │   └── main.tsx                  # Ponto de entrada React 19
 ├── tests/
-│   ├── run-all-tests.ts          # Suíte completa de 149 testes automatizados (17 seções)
+│   ├── run-all-tests.ts          # Suíte completa de 154 testes automatizados (17 seções)
 │   ├── run-section4.ts           # Teste focado de fechamento financeiro e rateio
 │   └── audit-multitenant-routes.ts# Auditoria automatizada de rotas e segurança
 ├── server.ts                     # Servidor unificado (Express + Vite)
@@ -270,7 +270,7 @@ npm run start
 
 ## 🧪 Testes Automatizados
 
-O sistema conta com **149 testes automatizados** cobrindo 100% das regras de negócio, fluxos de salão, copa, cozinha, fidelidade, pagamentos, fechamento de caixas e segurança criptográfica.
+O sistema conta com **154 testes automatizados** cobrindo 100% das regras de negócio, fluxos de salão, copa, cozinha, fidelidade, pagamentos, fechamento de caixas e segurança criptográfica.
 
 Para rodar a suíte completa:
 ```bash
@@ -278,7 +278,7 @@ npm test
 ```
 *(ou `npx tsx tests/run-all-tests.ts`)*
 
-### Cobertura dos 149 Testes (17 Seções):
+### Cobertura dos 154 Testes (17 Seções):
 1. **Seção 1:** Cadastros e isolamento multi-tenant de dados.
 2. **Seção 2:** Autenticação, tokens JWT e validação de papéis (RBAC).
 3. **Seção 3:** Ciclo operacional de evento (Check-in, consumo na comanda, KDS e entrega).
@@ -324,6 +324,12 @@ npm test
     - Isolamento absoluto entre estabelecimentos distintos (`validateTenantAccess`).
     - Validação de senha forte (mínimo de 8 caracteres).
     - Bloqueio de inicialização em produção se `JWT_SECRET` for menor que 32 caracteres.
+    - `comparePassword` estrito com `bcrypt.compare` (rejeita sumariamente o próprio hash do banco enviado como senha com 401).
+    - Obrigatoriedade de `senhaHash` sem valor padrão `'mock_hash'` na API (`POST /usuarios` -> 400) e no repository.
+    - Configuração de proxy reverso (`app.set('trust proxy', 1)`) em produção (Apache) garantindo que `req.ip` reflita o IP real.
+    - Isolamento de rate limits por IP real via cabeçalho `X-Forwarded-For`.
+    - Bloqueio de spoofing: cabeçalhos forjados pelo cliente são ignorados à esquerda do IP real injetado pelo proxy.
+    - Registro do IP real no banco de dados para controle de taxa e auditoria de autoatendimento.
 17. **Seção 17:** Segurança do Fluxo do Cliente (Autoatendimento QR da Mesa):
     - Requisições sem token de sessão em `POST /cliente/pedido` e `POST /pedidos/lancamento-rapido` bloqueadas com 401.
     - Token forjado/inválido ou expirado bloqueado com 401.
@@ -338,7 +344,7 @@ npm test
     - Fluxo sem SMS ("Não recebi o código"): emissão de sessão não-verificada (`POST /cliente/sessao-sem-codigo`); pedido nasce em `aguardando_validacao` com `telefoneVerificado: false`; tentativa de validação rápida com 1 toque é rejeitada com HTTP 400; validação presencial explícita é exigida e os itens só entram no KDS após essa confirmação.
 
 **Status atual da suíte de testes:**  
-`TOTAL: 149 | PASSOU: 149 (100%) | FALHOU: 0 | DIFERENÇAS: 0`
+`TOTAL: 154 | PASSOU: 154 (100%) | FALHOU: 0 | DIFERENÇAS: 0`
 
 ---
 

@@ -60,6 +60,7 @@ import {
   validateTenantAccess,
 } from '../src/server/auth.ts';
 import { app } from '../src/server/app.ts';
+import { _clearRateLimitsForTesting } from '../src/server/rate-limiter.ts';
 import http from 'http';
 import { eq, and, desc } from 'drizzle-orm';
 
@@ -87,6 +88,7 @@ async function runTestSuite() {
 
   // Prefix for isolation
   const prefix = `t_${Date.now().toString().slice(-6)}`;
+  const hashSenhaBcryptPadrao = await hashPassword('SenhaSegura123!');
 
   // ==========================================
   // SEÇÃO 1: CADASTROS E MULTI-TENANT
@@ -491,7 +493,7 @@ async function runTestSuite() {
       estabelecimentoId: est1.id,
       nome: 'Garçom Referência',
       papel: 'garcom',
-      senhaHash: 'hash',
+      senhaHash: hashSenhaBcryptPadrao,
     });
 
     // Criar comanda padrão com exatamente R$ 38 bebida e R$ 34 comida
@@ -619,7 +621,7 @@ async function runTestSuite() {
       estabelecimentoId: est1.id,
       nome: 'Garçom Gorjeta Dedicado',
       papel: 'garcom',
-      senhaHash: 'hash',
+      senhaHash: hashSenhaBcryptPadrao,
     });
 
     const ref2 = await criarComandaRef('GORJETA15');
@@ -1074,8 +1076,8 @@ async function runTestSuite() {
     const estRebal = await estabelecimentoService.create({ nome: `Bar Rebalanceamento ${prefix}`, tipo: 'bar_casa_noturna' });
     const evtRebal = await eventoService.create({ estabelecimentoId: estRebal.id, nome: 'Noite de Teste Rebal', dataInicio: new Date() });
 
-    const garcomA = await usuarioService.create({ estabelecimentoId: estRebal.id, nome: 'Garçom A (Rápido)', papel: 'garcom', senhaHash: 'hash' });
-    const garcomB = await usuarioService.create({ estabelecimentoId: estRebal.id, nome: 'Garçom B (Lento)', papel: 'garcom', senhaHash: 'hash' });
+    const garcomA = await usuarioService.create({ estabelecimentoId: estRebal.id, nome: 'Garçom A (Rápido)', papel: 'garcom', senhaHash: hashSenhaBcryptPadrao });
+    const garcomB = await usuarioService.create({ estabelecimentoId: estRebal.id, nome: 'Garçom B (Lento)', papel: 'garcom', senhaHash: hashSenhaBcryptPadrao });
 
     // Criar 20 mesas
     const mesas20: any[] = [];
@@ -1141,9 +1143,9 @@ async function runTestSuite() {
     // 8.2: Rodar rebalanceamento com número não divisível (ex: 7 mesas e 3 garçons)
     const estDiv = await estabelecimentoService.create({ nome: `Est Div7 ${prefix}`, tipo: 'bar_casa_noturna' });
     const evtDiv = await eventoService.create({ estabelecimentoId: estDiv.id, nome: 'Evt 7 Mesas', dataInicio: new Date() });
-    await usuarioService.create({ estabelecimentoId: estDiv.id, nome: 'G1', papel: 'garcom', senhaHash: 'h' });
-    await usuarioService.create({ estabelecimentoId: estDiv.id, nome: 'G2', papel: 'garcom', senhaHash: 'h' });
-    await usuarioService.create({ estabelecimentoId: estDiv.id, nome: 'G3', papel: 'garcom', senhaHash: 'h' });
+    await usuarioService.create({ estabelecimentoId: estDiv.id, nome: 'G1', papel: 'garcom', senhaHash: hashSenhaBcryptPadrao });
+    await usuarioService.create({ estabelecimentoId: estDiv.id, nome: 'G2', papel: 'garcom', senhaHash: hashSenhaBcryptPadrao });
+    await usuarioService.create({ estabelecimentoId: estDiv.id, nome: 'G3', papel: 'garcom', senhaHash: hashSenhaBcryptPadrao });
 
     for (let i = 1; i <= 7; i++) {
       await mesaService.create({ estabelecimentoId: estDiv.id, identificador: `MD-${i}`, qrCode: `QR-D7-${prefix}-${i}` });
@@ -1161,7 +1163,7 @@ async function runTestSuite() {
     // 8.3: Garçom sem nenhum pedido "visto" ainda no evento
     const estSemHistorico = await estabelecimentoService.create({ nome: `Est Novo ${prefix}`, tipo: 'bar_casa_noturna' });
     const evtSemHistorico = await eventoService.create({ estabelecimentoId: estSemHistorico.id, nome: 'Evt Sem Histórico', dataInicio: new Date() });
-    const gNovo = await usuarioService.create({ estabelecimentoId: estSemHistorico.id, nome: 'Garçom Sem Pedidos', papel: 'garcom', senhaHash: 'h' });
+    const gNovo = await usuarioService.create({ estabelecimentoId: estSemHistorico.id, nome: 'Garçom Sem Pedidos', papel: 'garcom', senhaHash: hashSenhaBcryptPadrao });
     await mesaService.create({ estabelecimentoId: estSemHistorico.id, identificador: `M-N1`, qrCode: `QR-N1-${prefix}` });
 
     const resNovo = await rebalanceamentoService.executarRebalanceamento(evtSemHistorico.id, estSemHistorico.id);
@@ -1434,7 +1436,7 @@ async function runTestSuite() {
       estabelecimentoId: est11.id,
       nome: `Garçom Meta Teste ${prefix}`,
       papel: 'garcom',
-      senhaHash: 'hash',
+      senhaHash: hashSenhaBcryptPadrao,
     });
     // Configura meta de 2 minutos (00:02:00 = 120s) para o garçom no evento
     await rebalanceamentoService.salvarMetaComissao({
@@ -1481,7 +1483,7 @@ async function runTestSuite() {
       nome: `Garçom A ${prefix}`,
       celular: '11977776666',
       papel: 'garcom',
-      senhaHash: 'hash',
+      senhaHash: hashSenhaBcryptPadrao,
     });
 
     const mesa12A = await mesaService.create({ estabelecimentoId: est12.id, identificador: 'Mesa 12-A', qrCode: `QR-M12A-${prefix}` });
@@ -4080,6 +4082,8 @@ async function runTestSuite() {
     const gerente16A = await usuarioService.create({
       estabelecimentoId: est16A.id,
       nome: `Gerente Seg A ${prefix}`,
+      email: `gerente16a_${prefix}@seg.com`,
+      celular: `11987${prefix.slice(-6)}`,
       papel: 'gerente',
       senhaHash: hash16,
     });
@@ -4300,13 +4304,162 @@ async function runTestSuite() {
     } catch (e: any) {
       prodSecretThrew = true;
     } finally {
-      process.env.NODE_ENV = oldNodeEnv;
-      process.env.JWT_SECRET = oldEnvSecret;
+      if (oldNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = oldNodeEnv;
+      }
+      if (oldEnvSecret === undefined) {
+        delete process.env.JWT_SECRET;
+      } else {
+        process.env.JWT_SECRET = oldEnvSecret;
+      }
     }
     if (prodSecretThrew) {
       record('16.6.1', 'Hardening de Ambiente', 'getJwtSecret em produção sem secret seguro (>=32 chars)', 'Lança exceção fatal impedindo inicialização', 'passou', 'Servidor recusa inicializar em produção quando JWT_SECRET é inseguro ou ausente.');
     } else {
       record('16.6.1', 'Hardening de Ambiente', 'getJwtSecret em produção', 'Lança exceção', 'falhou', 'Não lançou exceção');
+    }
+
+    // 16.5.3: Login usando o próprio hash guardado como senha deve falhar (401)
+    // Impede que hash vazado ou igualdade plainText bypass comparePassword
+    const resHashAsPassword = await fetch(`${baseUrl16}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        login: `gerente16a_${prefix}@seg.com`,
+        senha: hash16, // Envia a string do hash bcrypt em vez da senha original
+      }),
+    });
+    if (resHashAsPassword.status === 401) {
+      record('16.5.3', 'Hardening de Senhas', 'Login passando o hash do banco como senha', 'Retorna 401 Unauthorized (bcrypt.compare rejeita)', 'passou', 'Tentativa de login enviando o próprio hash armazenado rejeitada com HTTP 401.');
+    } else {
+      record('16.5.3', 'Hardening de Senhas', 'Login com o próprio hash', '401 Unauthorized', 'falhou', `Status recebido: ${resHashAsPassword.status}`);
+    }
+
+    // 16.5.4: Criar usuário sem senha deve falhar (400) na API e no repository
+    const resSemSenhaApi = await fetch(`${baseUrl16}/usuarios`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenGerenteA}`,
+      },
+      body: JSON.stringify({
+        estabelecimentoId: est16A.id,
+        nome: 'Usuario Sem Senha',
+        papel: 'garcom',
+      }),
+    });
+    let repoSemSenhaThrew = false;
+    try {
+      await usuarioService.create({
+        estabelecimentoId: est16A.id,
+        nome: 'Usuario Sem Senha Repo',
+        papel: 'garcom',
+        senhaHash: '',
+      } as any);
+    } catch (e: any) {
+      if (e?.message?.includes('senhaHash é obrigatório')) {
+        repoSemSenhaThrew = true;
+      }
+    }
+    if (resSemSenhaApi.status === 400 && repoSemSenhaThrew) {
+      record('16.5.4', 'Hardening de Senhas', 'Criar usuário sem senha na API e no repository', 'API retorna 400 e repository lança exceção', 'passou', 'Tentativa de criar usuário sem senha rejeitada com HTTP 400 e bloqueio em db-services.');
+    } else {
+      record('16.5.4', 'Hardening de Senhas', 'Criar usuário sem senha', 'API 400 e Repo threw', 'falhou', `API: ${resSemSenhaApi.status}, RepoThrew: ${repoSemSenhaThrew}`);
+    }
+
+    // 16.7.1: Proxy reverso (trust proxy 1): IPs diferentes via X-Forwarded-For têm limites separados
+    app.set('trust proxy', 1);
+    _clearRateLimitsForTesting();
+
+    const ipA = '203.0.113.101';
+    const ipB = '203.0.113.102';
+
+    // Dispara 5 tentativas erradas do IP A (atingindo o limite de 5 req/min do loginRateLimiter)
+    for (let i = 0; i < 5; i++) {
+      await fetch(`${baseUrl16}/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Forwarded-For': ipA,
+        },
+        body: JSON.stringify({ login: 'errado@seg.com', senha: 'WrongPassword123!' }),
+      });
+    }
+
+    // A 6ª tentativa do IP A deve ser bloqueada com 429
+    const resIpABlocked = await fetch(`${baseUrl16}/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': ipA,
+      },
+      body: JSON.stringify({ login: 'errado@seg.com', senha: 'WrongPassword123!' }),
+    });
+
+    // Tentativa vinda do IP B não deve estar bloqueada (retorna 401, não 429)
+    const resIpBAllowed = await fetch(`${baseUrl16}/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': ipB,
+      },
+      body: JSON.stringify({ login: 'errado@seg.com', senha: 'WrongPassword123!' }),
+    });
+
+    if (resIpABlocked.status === 429 && resIpBAllowed.status === 401) {
+      record('16.7.1', 'Proxy Reverso & Rate Limit', 'trust proxy 1 com IPs diferentes em X-Forwarded-For', 'IP A é bloqueado (429) e IP B mantém limite isolado (401)', 'passou', 'Rate limits de login isolados por IP real extraído do cabeçalho X-Forwarded-For.');
+    } else {
+      record('16.7.1', 'Proxy Reverso & Rate Limit', 'IPs diferentes limites separados', 'IP A: 429, IP B: 401', 'falhou', `IP A status: ${resIpABlocked.status}, IP B status: ${resIpBAllowed.status}`);
+    }
+
+    // 16.7.2: Cabeçalho X-Forwarded-For forjado pelo cliente (forged_ip, real_ip) não foge do limite
+    // O cliente IP A (já bloqueado) tenta forjar um header enviando IP falso à esquerda do IP real
+    const resSpoofedAttempt = await fetch(`${baseUrl16}/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': `198.51.100.99, ${ipA}`, // 198.51.100.99 forjado pelo cliente, ipA real adicionado pelo Apache
+      },
+      body: JSON.stringify({ login: 'errado@seg.com', senha: 'WrongPassword123!' }),
+    });
+
+    if (resSpoofedAttempt.status === 429) {
+      record('16.7.2', 'Proxy Reverso & Rate Limit', 'Tentativa de spoofing de IP com cabeçalho forjado', 'Continua bloqueado com 429 (trust proxy 1 extrai IP real do proxy)', 'passou', 'Express com trust proxy 1 ignorou o IP forjado à esquerda e manteve o bloqueio 429 no IP real.');
+    } else {
+      record('16.7.2', 'Proxy Reverso & Rate Limit', 'Tentativa de spoofing', '429 Too Many Requests', 'falhou', `Status recebido: ${resSpoofedAttempt.status}`);
+    }
+
+    // 16.7.3: Endpoints de autoatendimento (solicitar-codigo) usam o IP real do proxy reverso
+    const telSolicitarProxy = `11985${prefix.slice(-6)}`;
+    const resSolicitarIpReal = await fetch(`${baseUrl16}/cliente/solicitar-codigo`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': `10.99.99.99, 203.0.113.150`,
+      },
+      body: JSON.stringify({
+        estabelecimentoId: est16A.id,
+        telefone: telSolicitarProxy,
+      }),
+    });
+    const regVerifProxy = await db
+      .select()
+      .from(telefoneVerificacao)
+      .where(
+        and(
+          eq(telefoneVerificacao.estabelecimentoId, est16A.id),
+          eq(telefoneVerificacao.telefone, telSolicitarProxy)
+        )
+      )
+      .limit(1);
+
+    const ipGravadoCorreto = regVerifProxy[0]?.ip === '203.0.113.150';
+    if (resSolicitarIpReal.status === 200 && ipGravadoCorreto) {
+      record('16.7.3', 'Proxy Reverso & Rate Limit', 'solicitar-codigo grava o IP real desconsiderando spoofing', 'Grava 203.0.113.150 (ignora 10.99.99.99 forjado)', 'passou', `IP gravado no banco de dados com trust proxy 1: "${regVerifProxy[0]?.ip}".`);
+    } else {
+      record('16.7.3', 'Proxy Reverso & Rate Limit', 'solicitar-codigo IP real', '203.0.113.150', 'falhou', `Status: ${resSolicitarIpReal.status}, IP gravado: ${regVerifProxy[0]?.ip}`);
     }
 
     server16.close();
@@ -4343,6 +4496,7 @@ async function runTestSuite() {
       celular: '11988881799',
       email: `garcom17_${prefix}@bar.com`,
       papel: 'garcom',
+      senhaHash: hashSenhaBcryptPadrao,
     });
 
     // Abrir comanda nas mesas
@@ -4853,6 +5007,7 @@ async function runTestSuite() {
       nome: `Gerente Mesas ${prefix}`,
       email: `gerente_mesas_${prefix}@bar.com`,
       papel: 'gerente',
+      senhaHash: hashSenhaBcryptPadrao,
     });
     const tokenGerente17 = generateToken({
       userId: gerente17.id,

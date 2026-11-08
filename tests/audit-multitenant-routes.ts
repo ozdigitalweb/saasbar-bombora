@@ -13,7 +13,7 @@ import {
   comandaService,
   pedidoService,
 } from '../src/server/db-services.ts';
-import { generateToken } from '../src/server/auth.ts';
+import { generateToken, hashPassword } from '../src/server/auth.ts';
 
 interface RouteAudit {
   route: string;
@@ -57,7 +57,8 @@ async function runAudit() {
 
   // 2. Setup Resources belonging to Tenant Alfa
   const pontoAlfa = await pontoDePreparoService.create({ estabelecimentoId: estAlfa.id, nome: 'Copa Alfa' });
-  const userAlfa = await usuarioService.create({ estabelecimentoId: estAlfa.id, nome: 'User Alfa', papel: 'garcom', senhaHash: 'hash' });
+  const hashAlfa = await hashPassword('SenhaSegura123!');
+  const userAlfa = await usuarioService.create({ estabelecimentoId: estAlfa.id, nome: 'User Alfa', papel: 'garcom', senhaHash: hashAlfa });
   const mesaAlfa = await mesaService.create({ estabelecimentoId: estAlfa.id, identificador: `M-ALFA`, qrCode: `QR-ALFA-${prefix}` });
   const pulseiraAlfa = await pulseiraService.create({ estabelecimentoId: estAlfa.id, codigoQr: `PUL-ALFA-${prefix}` });
   const clienteAlfa = await clienteService.create({ estabelecimentoId: estAlfa.id, nome: 'Cliente Alfa', celular: `11988${prefix.slice(-6)}` });

@@ -152,3 +152,12 @@ export function buscaCelularRateLimiter(req: Request, res: Response, next: NextF
 
   next();
 }
+
+/**
+ * Função utilitária para testes automatizados limparem o estado em memória dos rate limiters
+ */
+export function _clearRateLimitsForTesting() {
+  loginAttempts.clear();
+  autoatendimentoRequests.clear();
+  buscaCelularRequests.clear();
+}

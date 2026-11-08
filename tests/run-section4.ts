@@ -32,6 +32,7 @@ import {
   pedidoService,
   fechamentoService,
 } from '../src/server/db-services.ts';
+import { hashPassword } from '../src/server/auth.ts';
 import { eq } from 'drizzle-orm';
 
 interface TestResult {
@@ -95,11 +96,12 @@ async function runSection4Tests() {
     preco: 34.0,
   });
 
+  const hashPadrao4 = await hashPassword('SenhaSegura123!');
   const garcomPadrao = await usuarioService.create({
     estabelecimentoId: est.id,
     nome: `Garçom Padrão ${prefix}`,
     papel: 'garcom',
-    senhaHash: 'hash',
+    senhaHash: hashPadrao4,
   });
 
   // Função auxiliar para criar comanda com R$ 72 de consumo (R$ 38 bebida + R$ 34 comida)
@@ -224,11 +226,12 @@ async function runSection4Tests() {
   // - Copa e Cozinha = R$ 0,00
   // =========================================================================
   console.log('--- Executando Teste 4.2: Gorjeta livre de R$ 15,00 (Consumo R$ 72 + Gorjeta R$ 15) ---');
+  const hashGorjeta4 = await hashPassword('SenhaSegura123!');
   const garcomGorjeta = await usuarioService.create({
     estabelecimentoId: est.id,
     nome: `Garçom Gorjeta ${prefix}`,
     papel: 'garcom',
-    senhaHash: 'hash',
+    senhaHash: hashGorjeta4,
   });
 
   const ref2 = await criarComandaRef('GORJETA15', garcomGorjeta.id);

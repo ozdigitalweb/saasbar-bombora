@@ -236,9 +236,12 @@ export const usuarioService = {
     papel: 'garcom' | 'gerente' | 'operador_balcao';
     celular?: string;
     email?: string;
-    senhaHash?: string;
+    senhaHash: string;
   }) {
     try {
+      if (!data.senhaHash || typeof data.senhaHash !== 'string' || data.senhaHash.trim().length === 0) {
+        throw new Error('senhaHash é obrigatório para cadastro de usuário.');
+      }
       const rows = await db
         .insert(usuario)
         .values({
@@ -247,12 +250,15 @@ export const usuarioService = {
           papel: data.papel,
           celular: data.celular || null,
           email: data.email || null,
-          senhaHash: data.senhaHash || 'mock_hash',
+          senhaHash: data.senhaHash,
         })
         .returning();
       return rows[0];
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error in usuarioService.create:', error);
+      if (error?.message?.includes('senhaHash é obrigatório')) {
+        throw error;
+      }
       throw new Error('Falha ao cadastrar usuário.', { cause: error });
     }
   },
@@ -4718,22 +4724,40 @@ export const telefoneVerificacaoService = {
         );
       }
 
-      // Regra 3: Rate limit por IP (máx 15 por hora)
+      // Regra 3: Rate limit por IP (máx 15 por hora no estabelecimento)
       if (data.ip) {
-        const enviosIp = enviosUltimaHora.filter(
-          (e) => e.ip === data.ip && new Date(e.criadoEm).getTime() >= umaHoraAtras.getTime()
+        const enviosPorIp = await db
+          .select()
+          .from(telefoneVerificacao)
+          .where(
+            and(
+              eq(telefoneVerificacao.estabelecimentoId, data.estabelecimentoId),
+              eq(telefoneVerificacao.ip, data.ip)
+            )
+          );
+        const enviosIpCount = enviosPorIp.filter(
+          (e) => new Date(e.criadoEm).getTime() >= umaHoraAtras.getTime()
         ).length;
-        if (enviosIp >= 15) {
+        if (enviosIpCount >= 15) {
           throw new Error('Limite de solicitações por IP excedido. Tente novamente mais tarde.');
         }
       }
 
-      // Regra 4: Rate limit por mesa (máx 10 por hora)
+      // Regra 4: Rate limit por mesa (máx 10 por hora no estabelecimento)
       if (data.mesaId) {
-        const enviosMesa = enviosUltimaHora.filter(
-          (e) => e.mesaId === data.mesaId && new Date(e.criadoEm).getTime() >= umaHoraAtras.getTime()
+        const enviosPorMesa = await db
+          .select()
+          .from(telefoneVerificacao)
+          .where(
+            and(
+              eq(telefoneVerificacao.estabelecimentoId, data.estabelecimentoId),
+              eq(telefoneVerificacao.mesaId, data.mesaId)
+            )
+          );
+        const enviosMesaCount = enviosPorMesa.filter(
+          (e) => new Date(e.criadoEm).getTime() >= umaHoraAtras.getTime()
         ).length;
-        if (enviosMesa >= 10) {
+        if (enviosMesaCount >= 10) {
           throw new Error('Limite de solicitações para esta mesa excedido.');
         }
       }

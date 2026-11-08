@@ -46,10 +46,14 @@ export async function hashPassword(plainText: string): Promise<string> {
 }
 
 export async function comparePassword(plainText: string, hash: string): Promise<boolean> {
-  if (!hash) return false;
-  // If hash is mock or plain text during initial development, allow fallback comparison
-  if (hash === plainText) return true;
-  return bcrypt.compare(plainText, hash);
+  if (!hash || typeof hash !== 'string' || !plainText || typeof plainText !== 'string') {
+    return false;
+  }
+  try {
+    return await bcrypt.compare(plainText, hash);
+  } catch {
+    return false;
+  }
 }
 
 export function generateToken(payload: TokenPayload): string {

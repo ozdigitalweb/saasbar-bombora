@@ -2,7 +2,7 @@
 
 **Data do Relatório:** 08 de Novembro de 2026  
 **Status da Versão Atual (V1):** 🟢 **100% Homologada & Pronta para Publicação**  
-**Resultado dos Testes Automatizados:** 149 testes executados | 149 aprovados (100%) | 0 falhas | 0 diferenças  
+**Resultado dos Testes Automatizados:** 154 testes executados | 154 aprovados (100%) | 0 falhas | 0 diferenças  
 **Qualidade de Código:** TypeScript estrito (`tsc --noEmit` aprovado com 0 erros) | Build de produção Vite aprovado  
 
 ---
@@ -25,7 +25,7 @@ O **SAASBAR** foi desenvolvido sob medida para suportar picos extremos de concor
                  ▼                                                     ▼
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                        API ROUTER EXPRESS & MIDDLEWARES GLOBAIS                        │
-│  • Autenticação Global Bearer JWT         • Rate Limiter por IP & Telefone             │
+│  • Autenticação Global Bearer JWT         • Rate Limiter por IP Real (trust proxy 1)   │
 │  • Whitelist Estrita de Rotas Públicas    • Multi-Tenant Isolation (validateTenant)    │
 │  • Token de Sessão Efémero (Cliente)      • Role-Based Access Control (RBAC)           │
 └──────────────────────────────────┬─────────────────────────────────────────────────────┘
