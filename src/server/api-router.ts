@@ -29,6 +29,8 @@ import {
   comparePassword,
   generateToken,
   verifyToken,
+  generateClientSessionToken,
+  verifyClientSessionToken,
   requireAuth,
   requireRole,
   validateTenantAccess,
@@ -53,9 +55,8 @@ export const apiRouter = Router();
 // 3. GET /cliente/mesa-por-qr: cliente escaneia o QR físico da mesa para identificar mesa/comanda
 // 4. POST /cliente/solicitar-codigo: cliente solicita código OTP de 6 dígitos via SMS/WhatsApp
 // 5. POST /cliente/verificar-codigo: cliente valida o código de 6 dígitos digitado
-// 6. GET /cliente/sessao-mesa: cliente consulta se a sessão da mesa já está verificada
-// 7. POST /cliente/pedido: envio de pedido pelo cliente na mesa (autoatendimento com rate limit)
-// 8. POST /pedidos/lancamento-rapido: envio de pedido pelo cliente quando origem === 'autoatendimento'
+// 7. POST /cliente/sessao-sem-codigo: início de sessão temporária não-verificada quando SMS indisponível
+// 8. POST /cliente/pedido: envio de pedido pelo cliente na mesa (autoatendimento com rate limit)
 export function isPublicRoute(method: string, path: string, body?: any): boolean {
   const m = method.toUpperCase();
   const p = path.replace(/\/+$/, '') || '/';
@@ -65,11 +66,9 @@ export function isPublicRoute(method: string, path: string, body?: any): boolean
   if (m === 'GET' && p === '/cliente/mesa-por-qr') return true;
   if (m === 'POST' && p === '/cliente/solicitar-codigo') return true;
   if (m === 'POST' && p === '/cliente/verificar-codigo') return true;
+  if (m === 'POST' && p === '/cliente/sessao-sem-codigo') return true;
   if (m === 'GET' && p === '/cliente/sessao-mesa') return true;
   if (m === 'POST' && p === '/cliente/pedido') return true;
-  if (m === 'POST' && p === '/pedidos/lancamento-rapido' && body?.origem === 'autoatendimento') {
-    return true;
-  }
   return false;
 }
 
@@ -521,19 +520,19 @@ apiRouter.get('/mesas/:id', async (req: Request, res: Response) => {
 
 apiRouter.post('/mesas', requireRole(['gerente']), async (req: Request, res: Response) => {
   try {
-    const { estabelecimentoId, identificador, qrCode, status } = req.body;
-    if (!estabelecimentoId || !identificador?.trim() || !qrCode?.trim()) {
+    const { estabelecimentoId, identificador, status } = req.body;
+    if (!estabelecimentoId || !identificador?.trim()) {
       return res.status(400).json({
-        error: 'estabelecimentoId, identificador e qrCode são obrigatórios',
+        error: 'estabelecimentoId e identificador são obrigatórios',
       });
     }
     if (!validateTenantAccess(req, estabelecimentoId)) {
       return res.status(403).json({ error: 'Acesso negado: não é permitido cadastrar recursos para outro estabelecimento.' });
     }
+    // Requisito 3: qrCode vindo do corpo é sumariamente ignorado; o servidor gera MESA-<uuid>
     const created = await mesaService.create({
       estabelecimentoId,
       identificador: identificador.trim(),
-      qrCode: qrCode.trim(),
       status: status || 'livre',
     });
     res.status(201).json(created);
@@ -549,15 +548,30 @@ apiRouter.put('/mesas/:id', requireRole(['gerente']), async (req: Request, res: 
     if (!validateTenantAccess(req, existing.estabelecimentoId)) {
       return res.status(403).json({ error: 'Acesso negado: recurso pertence a outro estabelecimento.' });
     }
-    const { identificador, qrCode, status } = req.body;
+    const { identificador, status } = req.body;
+    // Requisito 3: qrCode vindo do corpo em PUT é ignorado
     const updated = await mesaService.update(req.params.id, {
       ...(identificador ? { identificador: identificador.trim() } : {}),
-      ...(qrCode ? { qrCode: qrCode.trim() } : {}),
       ...(status ? { status } : {}),
     });
     res.json(updated);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Erro ao atualizar mesa' });
+  }
+});
+
+apiRouter.post('/mesas/:id/regenerar-qr', requireRole(['gerente']), async (req: Request, res: Response) => {
+  try {
+    const existing = await mesaService.getById(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Mesa não encontrada' });
+    if (!validateTenantAccess(req, existing.estabelecimentoId)) {
+      return res.status(403).json({ error: 'Acesso negado: recurso pertence a outro estabelecimento.' });
+    }
+    // Requisito 3: Gera novo QR Code MESA-<uuid> e invalida o anterior imediatamente
+    const updated = await mesaService.regenerarQrCode(req.params.id);
+    res.json(updated);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao regenerar QR code da mesa' });
   }
 });
 
@@ -1121,7 +1135,15 @@ apiRouter.get('/cliente/mesa-por-qr', autoatendimentoRateLimiter, async (req: Re
     if (!mesaFound) {
       return res.status(404).json({ error: 'Mesa não encontrada com o QR code fornecido.' });
     }
-    res.json({ mesa: mesaFound });
+    // Proteção de privacidade: Retorna exclusivamente a identificação da mesa (sem clientes nem outras mesas)
+    res.json({
+      mesa: {
+        id: mesaFound.id,
+        estabelecimentoId: mesaFound.estabelecimentoId,
+        identificador: mesaFound.identificador,
+        status: mesaFound.status,
+      },
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Erro ao buscar mesa pelo QR code.' });
   }
@@ -1144,12 +1166,59 @@ apiRouter.post('/cliente/solicitar-codigo', autoatendimentoRateLimiter, async (r
       ip: req.ip || req.socket.remoteAddress || undefined,
     });
 
-    // Regra: "o código aparece só no log do servidor e numa tela de depuração do gerente"
+    const isProduction = process.env.NODE_ENV === 'production';
     const { codigoDebug, ...respostaCliente } = resultado;
+    // Em produção, nunca retorna codigoDebug
+    if (isProduction) {
+      delete (respostaCliente as any).codigoDebug;
+    }
     res.status(200).json(respostaCliente);
   } catch (error: any) {
     console.error('Erro ao solicitar código de verificação:', error);
-    res.status(400).json({ error: error.message || 'Erro ao enviar código de verificação' });
+    // Requisito 7: Em produção sem provedor ou se o envio falhar/estiver indisponível, devolve status claro
+    const errMsg = error.message || '';
+    if (errMsg.includes('Modo simulado desativado') || errMsg.includes('SMS_API_KEY') || errMsg.includes('WHATSAPP_API_KEY') || errMsg.includes('provedor')) {
+      return res.status(200).json({
+        sucesso: false,
+        envioIndisponivel: true,
+        mensagem: 'Envio de código indisponível no momento. Você pode prosseguir e validar seu pedido presencialmente com o garçom.',
+      });
+    }
+    res.status(400).json({ error: errMsg || 'Erro ao enviar código de verificação' });
+  }
+});
+
+// Requisito 7: Rota pública para emissão de sessão de autoatendimento não-verificada (quando SMS não chega ou envio indisponível)
+apiRouter.post('/cliente/sessao-sem-codigo', autoatendimentoRateLimiter, async (req: Request, res: Response) => {
+  try {
+    const { estabelecimentoId, mesaId, comandaId, telefone } = req.body;
+    if (!estabelecimentoId || !mesaId) {
+      return res.status(400).json({ error: 'estabelecimentoId e mesaId são obrigatórios.' });
+    }
+
+    const targetMesa = await mesaService.getById(mesaId);
+    if (!targetMesa || targetMesa.estabelecimentoId !== estabelecimentoId) {
+      return res.status(404).json({ error: 'Mesa não encontrada para este estabelecimento.' });
+    }
+
+    const sessaoToken = generateClientSessionToken({
+      estabelecimentoId,
+      mesaId,
+      comandaId: comandaId || undefined,
+      telefone: telefone ? normalizarTelefone(telefone) : undefined,
+      verificado: false,
+    });
+
+    res.status(200).json({
+      sucesso: true,
+      token: sessaoToken,
+      sessaoToken,
+      verificado: false,
+      mensagem: 'Sessão temporária iniciada. Seu pedido precisará de validação presencial do garçom antes de ir para o preparo.',
+    });
+  } catch (error: any) {
+    console.error('Erro ao emitir sessão sem código:', error);
+    res.status(500).json({ error: error.message || 'Erro ao emitir sessão sem código.' });
   }
 });
 
@@ -1169,7 +1238,21 @@ apiRouter.post('/cliente/verificar-codigo', autoatendimentoRateLimiter, async (r
       codigo,
     });
 
-    res.status(200).json(resultado);
+    // Gera token assinado de sessão (curta duração: 2 horas) preso ao estabelecimentoId, mesaId, comandaId e telefone
+    const targetMesaId = mesaId || resultado.mesaId || '';
+    const sessaoToken = generateClientSessionToken({
+      estabelecimentoId: resultado.estabelecimentoId || estabelecimentoId,
+      mesaId: targetMesaId,
+      comandaId: resultado.comandaId || comandaId || undefined,
+      telefone: resultado.telefone,
+      clienteId: resultado.cliente?.id,
+    });
+
+    res.status(200).json({
+      ...resultado,
+      token: sessaoToken,
+      sessaoToken,
+    });
   } catch (error: any) {
     console.error('Erro ao verificar código:', error);
     res.status(400).json({ error: error.message || 'Código de verificação incorreto ou expirado' });
@@ -1185,6 +1268,7 @@ apiRouter.get('/cliente/sessao-mesa', autoatendimentoRateLimiter, async (req: Re
     }
 
     const status = await telefoneVerificacaoService.getStatusSessaoMesa(mesaId, eventoId);
+    // Retorna estritamente status de liberação e telefone mascarado (sem dados pessoais nem outras mesas)
     res.json(status);
   } catch (error: any) {
     console.error('Erro ao consultar sessão da mesa:', error);
@@ -1192,93 +1276,236 @@ apiRouter.get('/cliente/sessao-mesa', autoatendimentoRateLimiter, async (req: Re
   }
 });
 
-const handleLancamentoRapido = async (req: Request, res: Response) => {
+// ==========================================
+// FLUXO DO CLIENTE (AUTOATENDIMENTO MESA QR)
+// ==========================================
+const handleClientePedido = async (req: Request, res: Response) => {
   try {
-    const {
-      comandaId,
-      origem,
-      criadoPor,
-      itens,
-      telefone,
-      codigoNaoRecebido,
-      confirmadoPresencialmente,
-      telefoneVerificado: reqTelVerificado,
-    } = req.body;
+    // 1. SESSÃO VERIFICADA OBRIGATÓRIA (TOKEN JWT DE 2 HORAS COM TIPO 'cliente_sessao')
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        error: 'Sessão não autenticada. É obrigatório fornecer o token da sessão verificada por telefone no header Authorization.',
+      });
+    }
 
+    const clientToken = authHeader.split(' ')[1];
+    const clientSession = verifyClientSessionToken(clientToken);
+    if (!clientSession) {
+      return res.status(401).json({
+        error: 'Sessão inválida ou expirada. Solicite uma nova verificação de telefone.',
+      });
+    }
+
+    // 2. IDENTIDADE VEM 100% DO TOKEN (REJEITAR VALORES DIVERGENTES)
+    if (req.body.estabelecimentoId && req.body.estabelecimentoId !== clientSession.estabelecimentoId) {
+      return res.status(403).json({
+        error: 'Acesso negado: o token desta sessão pertence a outro estabelecimento.',
+      });
+    }
+
+    if (req.body.mesaId && req.body.mesaId !== clientSession.mesaId) {
+      return res.status(403).json({
+        error: 'Acesso negado: o token desta sessão pertence a outra mesa.',
+      });
+    }
+
+    if (req.body.comandaId && clientSession.comandaId && req.body.comandaId !== clientSession.comandaId) {
+      return res.status(403).json({
+        error: 'Acesso negado: a comanda informada é divergente do token da sessão.',
+      });
+    }
+
+    if (req.body.clienteId && clientSession.clienteId && req.body.clienteId !== clientSession.clienteId) {
+      return res.status(403).json({
+        error: 'Acesso negado: identidade de cliente divergente do token da sessão.',
+      });
+    }
+
+    // 3. ORIGEM AUTOATENDIMENTO NÃO TEM PODERES DE EQUIPE
+    const hasStaffPowersAttempt =
+      req.body.garcomId !== undefined ||
+      req.body.garcom !== undefined ||
+      (req.body.criadoPor !== undefined && req.body.criadoPor !== null) ||
+      (req.body.statusValidacao !== undefined && req.body.statusValidacao !== 'aguardando_validacao') ||
+      (req.body.status !== undefined && req.body.status !== 'aguardando_validacao' && req.body.status !== 'pendente') ||
+      (req.body.confirmadoPresencialmente !== undefined && req.body.confirmadoPresencialmente !== false) ||
+      (req.body.origem !== undefined && req.body.origem !== 'autoatendimento') ||
+      req.body.desconto !== undefined ||
+      req.body.descontos !== undefined ||
+      req.body.taxa !== undefined ||
+      req.body.taxaServico !== undefined ||
+      req.body.pagamento !== undefined ||
+      req.body.pago !== undefined ||
+      req.body.formaPagamento !== undefined;
+
+    if (hasStaffPowersAttempt) {
+      return res.status(403).json({
+        error: 'Operação proibida: autoatendimento não tem permissão para definir garçom, status, desconto, taxa ou pagamento.',
+      });
+    }
+
+    // 4. VALIDAÇÃO DE ITENS (MAX 30 ITENS, INTEIRO ENTRE 1 E 20)
+    const { itens } = req.body;
+    if (!Array.isArray(itens) || itens.length === 0) {
+      return res.status(400).json({ error: 'O pedido deve conter pelo menos um item.' });
+    }
+    if (itens.length > 30) {
+      return res.status(400).json({ error: 'O pedido excede o limite máximo de 30 itens.' });
+    }
+
+    for (const it of itens) {
+      if (!it.itemCardapioId || typeof it.itemCardapioId !== 'string') {
+        return res.status(400).json({ error: 'itemCardapioId é obrigatório para todos os itens.' });
+      }
+      const qtd = Number(it.quantidade);
+      if (!Number.isInteger(qtd) || qtd < 1 || qtd > 20) {
+        return res.status(400).json({
+          error: 'A quantidade de cada item deve ser um número inteiro entre 1 e 20.',
+        });
+      }
+    }
+
+    // Identidade estritamente do token
+    const mesaId = clientSession.mesaId;
+    const estabelecimentoId = clientSession.estabelecimentoId;
+
+    let comandaTarget: any = null;
+    if (req.body.comandaId) {
+      const cmdCheck = await comandaService.getById(req.body.comandaId);
+      if (!cmdCheck) {
+        return res.status(404).json({ error: 'Comanda não encontrada.' });
+      }
+      if (cmdCheck.mesaId !== mesaId) {
+        return res.status(403).json({
+          error: 'Acesso negado: a comanda informada pertence a outra mesa.',
+        });
+      }
+      if (cmdCheck.estabelecimentoId !== estabelecimentoId) {
+        return res.status(403).json({
+          error: 'Acesso negado: a comanda pertence a outro estabelecimento.',
+        });
+      }
+      comandaTarget = cmdCheck;
+    } else if (clientSession.comandaId) {
+      comandaTarget = await comandaService.getById(clientSession.comandaId);
+    }
+
+    if (!comandaTarget) {
+      comandaTarget = await comandaService.findByMesa(mesaId);
+    }
+
+    if (!comandaTarget) {
+      return res.status(400).json({
+        error: 'Nenhuma comanda aberta encontrada para esta mesa.',
+      });
+    }
+
+    // Sanitizar itens: Preços e nomes enviados no corpo são descartados (vêm do banco)
+    const sanitizedItens = itens.map((it: any) => ({
+      itemCardapioId: String(it.itemCardapioId).trim(),
+      quantidade: Math.floor(Number(it.quantidade)),
+    }));
+
+    // Requisito 7: Sessão com telefone verificado por SMS ou sessão não-verificada (presencial pendente)
+    const isVerificado = clientSession.verificado === true;
+    const resultado = await pedidoService.createWithRouting({
+      comandaId: comandaTarget.id,
+      origem: 'autoatendimento',
+      criadoPor: undefined,
+      itens: sanitizedItens,
+      telefoneVerificado: isVerificado,
+      confirmadoPresencialmente: false,
+      verificacaoMetodo: isVerificado ? 'sms' : undefined,
+      statusValidacao: 'aguardando_validacao',
+    });
+
+    return res.status(201).json(resultado);
+  } catch (error: any) {
+    console.error('Erro no pedido do autoatendimento:', error);
+    res.status(error.message?.includes('Limite de 3 pedidos') ? 400 : 500).json({
+      error: error.message || 'Erro ao processar pedido do cliente.',
+    });
+  }
+};
+
+// ==========================================
+// FLUXO DE EQUIPE (GARÇOM / OPERADOR / GERENTE)
+// ==========================================
+const handleStaffLancamentoRapido = async (req: Request, res: Response) => {
+  try {
+    const callerUser = (req as AuthRequest).user;
+    if (!callerUser) {
+      return res.status(401).json({ error: 'Não autenticado' });
+    }
+    const allowed = ['garcom', 'gerente', 'operador_balcao'];
+    if (!allowed.includes(callerUser.papel)) {
+      return res.status(403).json({ error: `Acesso negado para o papel "${callerUser.papel}".` });
+    }
+
+    const { comandaId, itens, confirmadoPresencialmente, origem } = req.body;
     if (!comandaId || !Array.isArray(itens) || itens.length === 0) {
       return res.status(400).json({ error: 'comandaId e itens são obrigatórios' });
+    }
+    if (itens.length > 30) {
+      return res.status(400).json({ error: 'O pedido excede o limite máximo de 30 itens.' });
+    }
+
+    for (const it of itens) {
+      if (!it.itemCardapioId) {
+        return res.status(400).json({ error: 'itemCardapioId é obrigatório para todos os itens.' });
+      }
+      const qtd = Number(it.quantidade);
+      if (!Number.isInteger(qtd) || qtd < 1 || qtd > 20) {
+        return res.status(400).json({
+          error: 'A quantidade de cada item deve ser um número inteiro entre 1 e 20.',
+        });
+      }
     }
 
     const cmd = await comandaService.getById(comandaId);
     if (!cmd) return res.status(404).json({ error: 'Comanda não encontrada' });
 
-    if (origem !== 'autoatendimento') {
-      const callerUser = (req as AuthRequest).user;
-      if (!callerUser) {
-        return res.status(401).json({ error: 'Não autenticado' });
-      }
-      const allowed = ['garcom', 'gerente', 'operador_balcao'];
-      if (!allowed.includes(callerUser.papel)) {
-        return res.status(403).json({ error: `Acesso negado para o papel "${callerUser.papel}".` });
-      }
-      if (!validateTenantAccess(req, cmd.estabelecimentoId)) {
-        return res.status(403).json({ error: 'Acesso negado: recurso pertence a outro estabelecimento.' });
-      }
+    if (!validateTenantAccess(req, cmd.estabelecimentoId)) {
+      return res.status(403).json({ error: 'Acesso negado: recurso pertence a outro estabelecimento.' });
     }
 
-    let telVerificado = false;
-    let confPresencial = false;
-    let metodoVerif: 'sms' | 'whatsapp' | 'presencial' | undefined = undefined;
+    const sanitizedItens = itens.map((it: any) => ({
+      itemCardapioId: String(it.itemCardapioId).trim(),
+      quantidade: Math.floor(Number(it.quantidade)),
+    }));
 
-    if (origem === 'autoatendimento') {
-      if (codigoNaoRecebido) {
-        // Cliente tocou em "Não recebi o código": pedido segue desmarcado para confirmação presencial
-        telVerificado = false;
-        confPresencial = false;
-        metodoVerif = undefined;
-      } else {
-        // Checar se a comanda/sessão da mesa já está verificada
-        const isCmdVerificado = Boolean(cmd.telefoneVerificado || reqTelVerificado);
-        if (isCmdVerificado) {
-          telVerificado = true;
-          metodoVerif = (cmd.verificacaoMetodo as any) || 'sms';
-        } else {
-          // Telefone não verificado e não informou que não recebeu
-          telVerificado = false;
-        }
-      }
-    } else {
-      // Pedidos criados pelo garçom / operador de balcão nascem validados
-      telVerificado = true;
-      confPresencial = true;
-      metodoVerif = 'presencial';
-    }
+    // Item 6: criadoPor vem SEMPRE do token de autenticação (req.user), nunca do corpo da requisição
+    const callerId = callerUser.userId || callerUser.id;
 
     const resultado = await pedidoService.createWithRouting({
       comandaId,
-      origem: origem || 'operador_balcao',
-      criadoPor,
-      itens,
-      telefoneVerificado: telVerificado,
-      confirmadoPresencialmente: Boolean(confirmadoPresencialmente || confPresencial),
-      verificacaoMetodo: metodoVerif,
+      origem: origem === 'garcom' ? 'garcom' : 'operador_balcao',
+      criadoPor: callerId,
+      itens: sanitizedItens,
+      telefoneVerificado: true,
+      confirmadoPresencialmente: Boolean(confirmadoPresencialmente ?? true),
+      verificacaoMetodo: 'presencial',
+      statusValidacao: 'validado',
     });
 
-    res.status(201).json(resultado);
+    return res.status(201).json(resultado);
   } catch (error: any) {
-    console.error('Erro no lançamento de pedido:', error);
+    console.error('Erro no lançamento rápido por equipe:', error);
     res.status(500).json({ error: error.message || 'Erro ao lançar pedido' });
   }
 };
 
 // Rota pública para envio de pedido pelo cliente via autoatendimento (mesa QR)
-apiRouter.post('/cliente/pedido', autoatendimentoRateLimiter, async (req: Request, res: Response) => {
-  req.body = { ...req.body, origem: 'autoatendimento' };
-  return handleLancamentoRapido(req, res);
-});
+apiRouter.post('/cliente/pedido', autoatendimentoRateLimiter, handleClientePedido);
 
-// Lançamento rápido de pedidos (Balcão e Autoatendimento)
-apiRouter.post('/pedidos/lancamento-rapido', autoatendimentoRateLimiter, handleLancamentoRapido);
+// Lançamento rápido de pedidos de equipe (Balcão e Garçom) - EXIGE AUTENTICAÇÃO DE EQUIPE
+apiRouter.post(
+  '/pedidos/lancamento-rapido',
+  requireAuth,
+  requireRole(['garcom', 'gerente', 'operador_balcao']),
+  handleStaffLancamentoRapido
+);
 
 // Validação de pedido de mesa pelo garçom (com ou sem confirmação presencial de telefone)
 apiRouter.post('/pedidos/:id/validar', requireAuth, requireRole(['garcom', 'gerente', 'operador_balcao']), async (req: Request, res: Response) => {

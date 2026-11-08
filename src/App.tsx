@@ -551,8 +551,7 @@ export default function App() {
   const handleCreateMesa = async (data: {
     estabelecimentoId: string;
     identificador: string;
-    qrCode: string;
-    status?: string;
+    status: string;
   }) => {
     try {
       const created = await api.createMesa(data);
@@ -566,7 +565,7 @@ export default function App() {
 
   const handleUpdateMesa = async (
     id: string,
-    data: { identificador?: string; qrCode?: string; status?: string }
+    data: { identificador?: string; status?: string }
   ) => {
     try {
       const updated = await api.updateMesa(id, data);
@@ -574,6 +573,17 @@ export default function App() {
       setMesas((prev) => prev.map((m) => (m.id === id ? updated : m)));
     } catch (err: any) {
       addToast('error', err.message || 'Erro ao atualizar mesa.');
+      throw err;
+    }
+  };
+
+  const handleRegenerarQrMesa = async (id: string) => {
+    try {
+      const updated = await api.regenerarQrMesa(id);
+      addToast('success', `Novo QR Code gerado para "${updated.identificador}".`);
+      setMesas((prev) => prev.map((m) => (m.id === id ? updated : m)));
+    } catch (err: any) {
+      addToast('error', err.message || 'Erro ao regenerar QR code da mesa.');
       throw err;
     }
   };
@@ -1033,6 +1043,7 @@ export default function App() {
                   currentEstabelecimento={currentEstabelecimento}
                   onCreate={handleCreateMesa}
                   onUpdate={handleUpdateMesa}
+                  onRegenerarQr={handleRegenerarQrMesa}
                   onDelete={handleDeleteMesa}
                 />
               )}

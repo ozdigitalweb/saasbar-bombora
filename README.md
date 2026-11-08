@@ -188,7 +188,7 @@ Apenas os endpoints estritamente necessários para o autoatendimento anônimo do
 │   │       └── UsuariosView.tsx              # Gestão da equipe (Gerentes, Garçons, Operadores)
 │   ├── db/
 │   │   ├── index.ts              # Pool de conexões PostgreSQL e client Drizzle
-│   │   └── schema.ts             # Esquema relacional completo (23 tabelas normalizadas)
+│   │   └── schema.ts             # Esquema relacional completo (22 tabelas normalizadas)
 │   ├── server/
 │   │   ├── api-router.ts         # Central de rotas da API com RBAC e proteções
 │   │   ├── app.ts                # Inicialização Express e middleware global de autenticação
@@ -198,7 +198,7 @@ Apenas os endpoints estritamente necessários para o autoatendimento anônimo do
 │   ├── App.tsx                   # Roteamento visual da aplicação
 │   └── main.tsx                  # Ponto de entrada React 19
 ├── tests/
-│   ├── run-all-tests.ts          # Suíte completa de 124 testes automatizados (16 seções)
+│   ├── run-all-tests.ts          # Suíte completa de 149 testes automatizados (17 seções)
 │   ├── run-section4.ts           # Teste focado de fechamento financeiro e rateio
 │   └── audit-multitenant-routes.ts# Auditoria automatizada de rotas e segurança
 ├── server.ts                     # Servidor unificado (Express + Vite)
@@ -270,7 +270,7 @@ npm run start
 
 ## 🧪 Testes Automatizados
 
-O sistema conta com **124 testes automatizados** cobrindo regras de negócio, fluxos de salão, copa, cozinha, fidelidade e segurança.
+O sistema conta com **149 testes automatizados** cobrindo 100% das regras de negócio, fluxos de salão, copa, cozinha, fidelidade, pagamentos, fechamento de caixas e segurança criptográfica.
 
 Para rodar a suíte completa:
 ```bash
@@ -278,7 +278,7 @@ npm test
 ```
 *(ou `npx tsx tests/run-all-tests.ts`)*
 
-### Cobertura dos 124 Testes (16 Seções):
+### Cobertura dos 149 Testes (17 Seções):
 1. **Seção 1:** Cadastros e isolamento multi-tenant de dados.
 2. **Seção 2:** Autenticação, tokens JWT e validação de papéis (RBAC).
 3. **Seção 3:** Ciclo operacional de evento (Check-in, consumo na comanda, KDS e entrega).
@@ -291,6 +291,16 @@ npm test
 10. **Seção 10:** Autoatendimento na mesa via QR Code.
 11. **Seção 11:** Painel KDS físico dedicado por praça de preparo.
 12. **Seção 12:** App do Garçom com as 5 abas operacionais móveis.
+13. **Seção 13:** Formas de pagamento, controle de caixa, comissões em dinheiro, sangrias, estorno e conciliação (13.1 a 13.11):
+    - Pagamento em dinheiro, PIX, débito e crédito com idempotência.
+    - Troco em dinheiro e validação estrita de valores recebidos.
+    - Rateio da taxa de serviço (10%) para garçons e equipe de apoio.
+    - Abertura de caixa com fundo de troco e fechamento com conferência cega.
+    - Comissão do garçom sobre vendas em dinheiro mantida "a consolidar" até o fechamento do caixa.
+    - Estorno de cobranças restrito a gerentes com justificativa obrigatória e auditoria.
+    - Isolamento multi-tenant absoluto em todas as operações de caixa e relatórios.
+    - Alerta visual de sangria quando o dinheiro em mãos ultrapassa o limite (`limiteDinheiroCaixa`).
+    - Relatório de conciliação com tolerância configurável (`toleranciaConciliacao`) classificando divergências em *ok*, *alerta* (âmbar) e *crítico* (vermelho).
 14. **Seção 14:** Validação de pedidos pelo garçom responsável e gerente:
     - Pedido em `aguardando_validacao` oculto no KDS.
     - Notificação exclusiva para o garçom da área em turno.
@@ -314,9 +324,49 @@ npm test
     - Isolamento absoluto entre estabelecimentos distintos (`validateTenantAccess`).
     - Validação de senha forte (mínimo de 8 caracteres).
     - Bloqueio de inicialização em produção se `JWT_SECRET` for menor que 32 caracteres.
+17. **Seção 17:** Segurança do Fluxo do Cliente (Autoatendimento QR da Mesa):
+    - Requisições sem token de sessão em `POST /cliente/pedido` e `POST /pedidos/lancamento-rapido` bloqueadas com 401.
+    - Token forjado/inválido ou expirado bloqueado com 401.
+    - Token assinado de curta duração (2 horas) amarrado à mesa física: tentativa de pedir na Mesa B usando token da Mesa A bloqueada com 403.
+    - Tentativa de vincular comanda de outra mesa bloqueada com 403.
+    - Tentativa de adulteração de preços e nomes de itens no corpo ignorada: o servidor descarta e calcula o total exclusivamente pelo banco de dados (`itemCardapio.preco`).
+    - Tentativa de injeção de poderes de equipe (`garcomId`, `criadoPor`, `statusValidacao="validado"`, `desconto`, `pago`) bloqueada com 403.
+    - Código de verificação: expira em 5 minutos, uso único garantido, bloqueio na 3ª tentativa errada e ausência de vazamento de códigos em produção.
+    - Pedido legítimo de autoatendimento nasce sempre em `aguardando_validacao` sem garçom atribuído até a validação presencial ou com 1 toque pelo garçom da área.
+    - Isolamento mútuo total de tokens: token de autoatendimento (`cliente_sessao`) é rejeitado com 401/403 em rotas administrativas (`/mesas`, `/clientes`, `/comandas`, `/itens-cardapio`, `/usuarios`, `/bootstrap`), e token de equipe é rejeitado em `/cliente/pedido`.
+    - QR Code de mesa: o servidor sempre gera `MESA-<uuid>` e ignora valores enviados pelo cliente/gerente no cadastro ou edição; botão "Gerar novo QR" invalida o QR anterior.
+    - Fluxo sem SMS ("Não recebi o código"): emissão de sessão não-verificada (`POST /cliente/sessao-sem-codigo`); pedido nasce em `aguardando_validacao` com `telefoneVerificado: false`; tentativa de validação rápida com 1 toque é rejeitada com HTTP 400; validação presencial explícita é exigida e os itens só entram no KDS após essa confirmação.
 
 **Status atual da suíte de testes:**  
-`TOTAL: 124 | PASSOU: 124 (100%) | FALHOU: 0 | DIFERENÇAS: 0`
+`TOTAL: 149 | PASSOU: 149 (100%) | FALHOU: 0 | DIFERENÇAS: 0`
+
+---
+
+## 🚀 Checklist Pré-Deploy para a V1 Ir ao Ar
+
+Para publicar a versão 1 em ambiente de produção real:
+
+1. **Banco PostgreSQL Gerenciado:** Provisionar instância de produção (Cloud SQL, Supabase, Neon ou RDS) e configurar as variáveis `SQL_HOST`, `SQL_USER`, `SQL_PASSWORD`, `SQL_DB_NAME`.
+2. **Segredo JWT de Produção:** Configurar `JWT_SECRET` com no mínimo 32 caracteres criptograficamente aleatórios no painel de ambiente (o servidor recusa inicializar se ausente ou menor que 32 chars).
+3. **Provedor Real de SMS / WhatsApp:** Configurar a credencial de envio de mensagens transacionais (`SMS_PROVIDER_API_KEY`) para envio real de códigos OTP aos celulares dos clientes.
+4. **Provisionamento Inicial (CLI):** Executar `npm run init-admin` para gerar o primeiro estabelecimento e as credenciais seguras do primeiro Gerente Geral.
+5. **Certificado HTTPS / SSL:** Configurar domínio com SSL ativo (requisito obrigatório dos navegadores para leitura de câmera de QR Code nos celulares dos clientes e garçons).
+6. **Impressão de QR Codes:** Cadastrar mesas e camarotes e imprimir os displays com os QR Codes de alta entropia gerados pelo sistema.
+
+---
+
+## 🗺️ Roadmap de Próximas Versões e MVPs (MVP 3+)
+
+| Versão / MVP | Funcionalidade Planejada | Impacto Operacional |
+| :--- | :--- | :--- |
+| **MVP 3** | **Pagamento com PIX Dinâmico na Mesa** | O cliente consulta o extrato no próprio celular e paga via PIX Copia-e-Cola / QR Code Pix gerado dinamicamente via webhook bancário (Mercado Pago, Stone ou EFI), liberando a comanda sem aguardar o garçom. |
+| **MVP 4** | **Catracas Eletrônicas e Hardware RFID** | Integração via TCP/IP com catracas de acesso físico (Control iD, Henry, Telematica), liberando a saída do cliente apenas se a comanda/pulseira estiver 100% quitada no sistema. |
+| **MVP 5** | **Totens Físicos de Autoatendimento** | Interface quiosque touchscreen para pista e áreas externas para compra rápida de fichas de bebidas e combos de garrafas sem fila. |
+| **MVP 6** | **Ficha Técnica & Baixa de Estoque por Doses** | Baixa milimétrica automatizada de mililitros de destilados, latas de energético e insumos a cada drink liberado no KDS do Bar. |
+| **MVP 7** | **BI com IA e Previsão de Demanda** | Previsão de público e escala ideal de funcionários e estoque baseada no perfil da atração musical e histórico de eventos anteriores. |
+| **MVP 8** | **App Nativo Offline-First (Capacitor/Mobile)** | Operação contínua do aplicativo do garçom mesmo em subsolos ou pontos cegos de Wi-Fi, sincronizando pedidos em lote ao restabelecer o sinal. |
+
+> 📑 *Consulte o documento completo [`RELATORIO_TECNICO_PRODUCAO.md`](./RELATORIO_TECNICO_PRODUCAO.md) para a análise técnica detalhada de cada módulo.*
 
 ---
 

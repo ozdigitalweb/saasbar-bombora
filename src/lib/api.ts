@@ -242,7 +242,7 @@ export const api = {
   async createMesa(data: {
     estabelecimentoId: string;
     identificador: string;
-    qrCode: string;
+    qrCode?: string;
     status?: string;
   }): Promise<Mesa> {
     const res = await fetch('/api/mesas', {
@@ -260,6 +260,13 @@ export const api = {
       method: 'PUT',
       headers: getHeaders(),
       body: JSON.stringify(data),
+    });
+    return handleResponse<Mesa>(res);
+  },
+  async regenerarQrMesa(id: string): Promise<Mesa> {
+    const res = await fetch(`/api/mesas/${encodeURIComponent(id)}/regenerar-qr`, {
+      method: 'POST',
+      headers: getHeaders(),
     });
     return handleResponse<Mesa>(res);
   },
@@ -530,19 +537,44 @@ export const api = {
   // ==========================================
   // OPERATIONAL API: LANÇAMENTO RÁPIDO & KDS
   // ==========================================
+  async clientePedido(data: {
+    itens: Array<{ itemCardapioId: string; quantidade: number }>;
+    token: string;
+    mesaId?: string;
+    comandaId?: string;
+    estabelecimentoId?: string;
+  }) {
+    const customHeaders: Record<string, string> = {
+      Authorization: `Bearer ${data.token}`,
+    };
+    const res = await fetch('/api/cliente/pedido', {
+      method: 'POST',
+      headers: getHeaders(customHeaders),
+      body: JSON.stringify({
+        itens: data.itens,
+        mesaId: data.mesaId,
+        comandaId: data.comandaId,
+        estabelecimentoId: data.estabelecimentoId,
+      }),
+    });
+    return handleResponse<any>(res);
+  },
+
   async lancamentoRapido(data: {
     comandaId: string;
     origem: 'operador_balcao' | 'garcom' | 'autoatendimento';
     criadoPor?: string;
     itens: Array<{ itemCardapioId: string; quantidade: number }>;
-    telefone?: string;
-    codigoNaoRecebido?: boolean;
     confirmadoPresencialmente?: boolean;
-    telefoneVerificado?: boolean;
+    token?: string;
   }) {
+    const customHeaders: Record<string, string> = {};
+    if (data.token) {
+      customHeaders['Authorization'] = `Bearer ${data.token}`;
+    }
     const res = await fetch('/api/pedidos/lancamento-rapido', {
       method: 'POST',
-      headers: getHeaders(),
+      headers: getHeaders(customHeaders),
       body: JSON.stringify(data),
     });
     return handleResponse<any>(res);
@@ -571,6 +603,20 @@ export const api = {
     codigo: string;
   }) {
     const res = await fetch('/api/cliente/verificar-codigo', {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(data),
+    });
+    return handleResponse<any>(res);
+  },
+
+  async sessaoSemCodigo(data: {
+    estabelecimentoId: string;
+    mesaId: string;
+    comandaId?: string;
+    telefone?: string;
+  }) {
+    const res = await fetch('/api/cliente/sessao-sem-codigo', {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify(data),

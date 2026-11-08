@@ -50,7 +50,15 @@ import {
   mascararTelefone,
   normalizarTelefone,
 } from '../src/server/db-services.ts';
-import { generateToken, verifyToken, hashPassword, getJwtSecret, validateTenantAccess } from '../src/server/auth.ts';
+import {
+  generateToken,
+  verifyToken,
+  generateClientSessionToken,
+  verifyClientSessionToken,
+  hashPassword,
+  getJwtSecret,
+  validateTenantAccess,
+} from '../src/server/auth.ts';
 import { app } from '../src/server/app.ts';
 import http from 'http';
 import { eq, and, desc } from 'drizzle-orm';
@@ -2505,6 +2513,117 @@ async function runTestSuite() {
         `bloqueios: abrir=${bloqueouAbrirCaixa}, sangria=${bloqueouSangria}, fechar=${bloqueouFecharCaixa}, rel=${bloqueouRelatorioConciliacao}`
       );
     }
+
+    // 13.10 Alerta de sangria por limite de dinheiro em mãos (limiteDinheiroCaixa)
+    const garcomLimite13 = await usuarioService.create({
+      estabelecimentoId: est13.id,
+      nome: `Garçom Limite ${timestampSec13}`,
+      email: `garcom.limite.${timestampSec13}@saasbar.com`,
+      senhaHash: hashSenha13,
+      papel: 'garcom',
+      celular: '11999990099',
+    });
+    const cxLimite = await caixaGarcomService.abrir({
+      eventoId: evt13.id,
+      garcomId: garcomLimite13.id,
+      fundoTrocoInicial: 100.0,
+      abertoPor: gerente13.id,
+      estabelecimentoId: est13.id,
+    });
+    const cmdLimite = await comandaService.create({
+      eventoId: evt13.id,
+      tipoAtendimento: 'mesa',
+      garcomResponsavelId: garcomLimite13.id,
+    });
+    await db.insert(cobranca).values({
+      comandaId: cmdLimite.id,
+      eventoId: evt13.id,
+      estabelecimentoId: est13.id,
+      metodo: 'dinheiro',
+      valor: '450.00',
+      status: 'aprovada',
+      registradoPor: garcomLimite13.id,
+    });
+
+    const statusAntesSangria = await caixaGarcomService.getStatus(garcomLimite13.id, evt13.id, est13.id);
+
+    await caixaGarcomService.registrarSangria({
+      caixaId: cxLimite.id,
+      valor: 200.0,
+      motivo: 'Recolhimento de sangria de segurança no salão',
+      registradaPor: gerente13.id,
+      estabelecimentoId: est13.id,
+    });
+
+    const statusDepoisSangria = await caixaGarcomService.getStatus(garcomLimite13.id, evt13.id, est13.id);
+
+    if (
+      statusAntesSangria.limiteDinheiro === 500 &&
+      statusAntesSangria.dinheiroEmMaos === 550 &&
+      statusAntesSangria.alertaSangria === true &&
+      statusDepoisSangria.dinheiroEmMaos === 350 &&
+      statusDepoisSangria.alertaSangria === false
+    ) {
+      record(
+        '13.10',
+        'Formas de Pagamento',
+        'Alerta de sangria por limite de dinheiro em mãos',
+        'Dispara alertaSangria=true quando dinheiroEmMaos > limiteDinheiroCaixa (500) e desativa após sangria',
+        'passou',
+        `Antes da sangria: dinheiroEmMaos=R$ ${statusAntesSangria.dinheiroEmMaos.toFixed(2)}, alerta=${statusAntesSangria.alertaSangria}. Após sangria de R$ 200,00: dinheiroEmMaos=R$ ${statusDepoisSangria.dinheiroEmMaos.toFixed(2)}, alerta=${statusDepoisSangria.alertaSangria}.`
+      );
+    } else {
+      record(
+        '13.10',
+        'Formas de Pagamento',
+        'Alerta de sangria por limite de dinheiro',
+        'alertaSangria=true quando acima do limite',
+        'falhou',
+        `Antes: emMaos=${statusAntesSangria.dinheiroEmMaos}, alerta=${statusAntesSangria.alertaSangria}; Depois: emMaos=${statusDepoisSangria.dinheiroEmMaos}, alerta=${statusDepoisSangria.alertaSangria}`
+      );
+    }
+
+    // 13.11 Tolerância de conciliação de maquininha (toleranciaConciliacao)
+    const relBase = await conciliacaoService.getRelatorio(evt13.id, est13.id);
+    const totalCreditoAprovado = relBase.resumoMetodos.credito.totalAprovado;
+    const totalDebitoAprovado = relBase.resumoMetodos.debito.totalAprovado;
+
+    const relOk = await conciliacaoService.getRelatorio(evt13.id, est13.id, {
+      credito: totalCreditoAprovado,
+      debito: totalDebitoAprovado,
+    });
+    const relAlerta = await conciliacaoService.getRelatorio(evt13.id, est13.id, {
+      credito: totalCreditoAprovado + 5.0,
+      debito: totalDebitoAprovado,
+    });
+    const relCritico = await conciliacaoService.getRelatorio(evt13.id, est13.id, {
+      credito: totalCreditoAprovado + 50.0,
+      debito: totalDebitoAprovado,
+    });
+
+    if (
+      relOk.resumoMetodos.credito.nivelAlerta === 'ok' &&
+      relAlerta.resumoMetodos.credito.nivelAlerta === 'alerta' &&
+      relCritico.resumoMetodos.credito.nivelAlerta === 'critico'
+    ) {
+      record(
+        '13.11',
+        'Formas de Pagamento',
+        'Tolerância de conciliação de maquininha configurável',
+        'Diferença 0 -> ok, diferença <= tolerância (10) -> alerta (âmbar), diferença > tolerância -> critico (vermelho)',
+        'passou',
+        `Níveis de alerta validados com tolerância de R$ 10,00: Dif R$ 0,00 -> '${relOk.resumoMetodos.credito.nivelAlerta}', Dif R$ 5,00 -> '${relAlerta.resumoMetodos.credito.nivelAlerta}', Dif R$ 50,00 -> '${relCritico.resumoMetodos.credito.nivelAlerta}'.`
+      );
+    } else {
+      record(
+        '13.11',
+        'Formas de Pagamento',
+        'Tolerância de conciliação',
+        'ok/alerta/critico conforme tolerância',
+        'falhou',
+        `relOk=${relOk.resumoMetodos.credito.nivelAlerta}, relAlerta=${relAlerta.resumoMetodos.credito.nivelAlerta}, relCritico=${relCritico.resumoMetodos.credito.nivelAlerta}`
+      );
+    }
   } catch (err: any) {
     console.error('Erro na Seção 13:', err);
   }
@@ -4195,12 +4314,715 @@ async function runTestSuite() {
     console.error('Erro na Seção 16:', err);
   }
 
+  // ==========================================
+  // SEÇÃO 17: SEGURANÇA DO FLUXO DO CLIENTE (AUTOATENDIMENTO QR DA MESA)
+  // ==========================================
+  console.log('\n--- 17. Segurança do Fluxo do Cliente (Autoatendimento QR) ---');
+  try {
+    const server17 = http.createServer(app);
+    await new Promise<void>((resolve) => server17.listen(0, resolve));
+    const port17 = (server17.address() as any).port;
+    const baseUrl17 = `http://127.0.0.1:${port17}/api`;
+
+    const est17 = await estabelecimentoService.create({ nome: `Est Autoatend ${prefix}`, tipo: 'bar_casa_noturna' });
+    const evt17 = await eventoService.create({ estabelecimentoId: est17.id, nome: `Noite Autoatend ${prefix}`, dataInicio: new Date() });
+    const mesa17A = await mesaService.create({ estabelecimentoId: est17.id, identificador: `Mesa 17-A ${prefix}`, qrCode: `qr_m17a_${prefix}` });
+    const mesa17B = await mesaService.create({ estabelecimentoId: est17.id, identificador: `Mesa 17-B ${prefix}`, qrCode: `qr_m17b_${prefix}` });
+
+    const ponto17 = await pontoDePreparoService.create({ estabelecimentoId: est17.id, nome: `Bar 17 ${prefix}` });
+    const itemCardapio17 = await itemCardapioService.create({
+      estabelecimentoId: est17.id,
+      pontoDePreparoId: ponto17.id,
+      nome: 'Gin Tônica Especial',
+      preco: 36.5,
+    });
+
+    const garcom17 = await usuarioService.create({
+      estabelecimentoId: est17.id,
+      nome: `Garçom 17 ${prefix}`,
+      celular: '11988881799',
+      email: `garcom17_${prefix}@bar.com`,
+      papel: 'garcom',
+    });
+
+    // Abrir comanda nas mesas
+    const cmd17A = await comandaService.create({
+      eventoId: evt17.id,
+      tipoAtendimento: 'mesa',
+      mesaId: mesa17A.id,
+    });
+    const cmd17B = await comandaService.create({
+      eventoId: evt17.id,
+      tipoAtendimento: 'mesa',
+      mesaId: mesa17B.id,
+    });
+
+    const telClienteA = '11977771701';
+
+    // 17.1.1: POST /cliente/pedido sem token no header Authorization retorna 401
+    const resSemToken1 = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mesaId: mesa17A.id,
+        comandaId: cmd17A.id,
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    if (resSemToken1.status === 401) {
+      record('17.1.1', 'Segurança Autoatendimento', 'POST /cliente/pedido sem token', 'Retorna 401 Unauthorized', 'passou', 'Requisição sem token de sessão bloqueada com HTTP 401.');
+    } else {
+      record('17.1.1', 'Segurança Autoatendimento', 'POST /cliente/pedido sem token', '401 Unauthorized', 'falhou', `Status: ${resSemToken1.status}`);
+    }
+
+    // 17.1.2: POST /pedidos/lancamento-rapido com origem 'autoatendimento' sem token retorna 401
+    const resSemToken2 = await fetch(`${baseUrl17}/pedidos/lancamento-rapido`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        origem: 'autoatendimento',
+        mesaId: mesa17A.id,
+        comandaId: cmd17A.id,
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    if (resSemToken2.status === 401) {
+      record('17.1.2', 'Segurança Autoatendimento', 'POST /pedidos/lancamento-rapido autoatendimento sem token', 'Retorna 401 Unauthorized', 'passou', 'Lançamento rápido de autoatendimento sem token bloqueado com HTTP 401.');
+    } else {
+      record('17.1.2', 'Segurança Autoatendimento', 'POST /pedidos/lancamento-rapido autoatendimento sem token', '401 Unauthorized', 'falhou', `Status: ${resSemToken2.status}`);
+    }
+
+    // 17.1.3: Token inválido / forjado retorna 401
+    const resTokenInvalido = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token_forjado_invalido_xyz123',
+      },
+      body: JSON.stringify({
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    if (resTokenInvalido.status === 401) {
+      record('17.1.3', 'Segurança Autoatendimento', 'Pedido com token forjado/inválido', 'Retorna 401 Unauthorized', 'passou', 'Token não assinado ou corrompido rejeitado com HTTP 401.');
+    } else {
+      record('17.1.3', 'Segurança Autoatendimento', 'Pedido com token inválido', '401 Unauthorized', 'falhou', `Status: ${resTokenInvalido.status}`);
+    }
+
+    // 17.2: Obter token legítimo de 2 horas para a Mesa A
+    const tokenMesaA = generateClientSessionToken({
+      estabelecimentoId: est17.id,
+      mesaId: mesa17A.id,
+      comandaId: cmd17A.id,
+      telefone: telClienteA,
+    });
+
+    // 17.3.1: Token da Mesa A tentando pedir na Mesa B (mesaId divergente) retorna 403
+    const resMesaCruzadaCorpo = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenMesaA}`,
+      },
+      body: JSON.stringify({
+        mesaId: mesa17B.id, // Mesa B divergente do token (Mesa A)
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    if (resMesaCruzadaCorpo.status === 403) {
+      record('17.3.1', 'Segurança Autoatendimento', 'Token da Mesa A tentando pedir na Mesa B', 'Retorna 403 Forbidden', 'passou', 'Tentativa de pedir em outra mesa bloqueada com HTTP 403.');
+    } else {
+      record('17.3.1', 'Segurança Autoatendimento', 'Token mesa A pedindo mesa B', '403 Forbidden', 'falhou', `Status: ${resMesaCruzadaCorpo.status}`);
+    }
+
+    // 17.3.2: Token da Mesa A tentando pedir com comandaId da Mesa B retorna 403
+    const resComandaCruzada = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenMesaA}`,
+      },
+      body: JSON.stringify({
+        comandaId: cmd17B.id, // Comanda da Mesa B
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    if (resComandaCruzada.status === 403) {
+      record('17.3.2', 'Segurança Autoatendimento', 'Token da Mesa A tentando pedir com comanda da Mesa B', 'Retorna 403 Forbidden', 'passou', 'Tentativa de vincular pedido à comanda de outra mesa bloqueada com HTTP 403.');
+    } else {
+      record('17.3.2', 'Segurança Autoatendimento', 'Token mesa A com comanda mesa B', '403 Forbidden', 'falhou', `Status: ${resComandaCruzada.status}`);
+    }
+
+    // 17.4.1: Corpo com preço adulterado (ex: preco: 0.01) é ignorado e comanda usa preço real do cardápio
+    const resPrecoAdulterado = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenMesaA}`,
+      },
+      body: JSON.stringify({
+        itens: [
+          {
+            itemCardapioId: itemCardapio17.id,
+            quantidade: 2,
+            preco: 0.01, // Tentativa de hack de preço
+            nome: 'Item Grátis',
+          },
+        ],
+      }),
+    });
+    const cmdCheckPreco = await comandaService.getById(cmd17A.id);
+    const precoCorretoNoBanco = cmdCheckPreco ? Math.abs(cmdCheckPreco.totalConsumo - 73.0) < 0.01 : false; // 2 * 36.50 = 73.00
+
+    if (resPrecoAdulterado.status === 201 && precoCorretoNoBanco) {
+      record('17.4.1', 'Segurança Autoatendimento', 'Corpo com preço adulterado é ignorado', 'Total da comanda calculado com preço real do cardápio (2x 36.50 = R$ 73.00)', 'passou', `Preço adulterado (0.01) descartado. Comanda totalConsumo = R$ ${cmdCheckPreco?.totalConsumo.toFixed(2)}.`);
+    } else {
+      record('17.4.1', 'Segurança Autoatendimento', 'Preço adulterado ignorado', 'Preço do banco', 'falhou', `Status: ${resPrecoAdulterado.status}, Total: ${cmdCheckPreco?.totalConsumo}`);
+    }
+
+    // 17.4.2: Origem 'autoatendimento' tentando injetar garcomId retorna 403
+    const resInjetarGarcom = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenMesaA}`,
+      },
+      body: JSON.stringify({
+        garcomId: '00000000-0000-0000-0000-000000000001',
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    if (resInjetarGarcom.status === 403) {
+      record('17.4.2', 'Segurança Autoatendimento', 'Origem autoatendimento tentando definir garcomId', 'Retorna 403 Forbidden', 'passou', 'Injeção de garcomId por autoatendimento bloqueada com HTTP 403.');
+    } else {
+      record('17.4.2', 'Segurança Autoatendimento', 'Injetar garcomId', '403 Forbidden', 'falhou', `Status: ${resInjetarGarcom.status}`);
+    }
+
+    // 17.4.3: Origem 'autoatendimento' tentando definir statusValidacao: 'validado' retorna 403
+    const resInjetarStatus = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenMesaA}`,
+      },
+      body: JSON.stringify({
+        statusValidacao: 'validado',
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    if (resInjetarStatus.status === 403) {
+      record('17.4.3', 'Segurança Autoatendimento', 'Origem autoatendimento tentando definir statusValidacao="validado"', 'Retorna 403 Forbidden', 'passou', 'Tentativa de auto-validar pedido bloqueada com HTTP 403.');
+    } else {
+      record('17.4.3', 'Segurança Autoatendimento', 'Auto-validação', '403 Forbidden', 'falhou', `Status: ${resInjetarStatus.status}`);
+    }
+
+    // 17.4.4: Origem 'autoatendimento' tentando definir desconto ou pago retorna 403
+    const resInjetarDesconto = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenMesaA}`,
+      },
+      body: JSON.stringify({
+        desconto: 50.0,
+        pago: true,
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    if (resInjetarDesconto.status === 403) {
+      record('17.4.4', 'Segurança Autoatendimento', 'Origem autoatendimento tentando definir desconto ou pagamento', 'Retorna 403 Forbidden', 'passou', 'Campos financeiros de equipe bloqueados para autoatendimento com HTTP 403.');
+    } else {
+      record('17.4.4', 'Segurança Autoatendimento', 'Injetar desconto/pago', '403 Forbidden', 'falhou', `Status: ${resInjetarDesconto.status}`);
+    }
+
+    // 17.5.1: Código expirado é bloqueado em /cliente/verificar-codigo
+    const telExpirar = '11977771702';
+    await telefoneVerificacaoService.solicitarCodigo({
+      estabelecimentoId: est17.id,
+      mesaId: mesa17A.id,
+      telefone: telExpirar,
+    });
+    // Forçar data de expiração no passado
+    await db
+      .update(telefoneVerificacao)
+      .set({ expiraEm: new Date(Date.now() - 60000) })
+      .where(and(eq(telefoneVerificacao.estabelecimentoId, est17.id), eq(telefoneVerificacao.telefone, telExpirar)));
+
+    const resCodigoExpirado = await fetch(`${baseUrl17}/cliente/verificar-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estabelecimentoId: est17.id,
+        mesaId: mesa17A.id,
+        telefone: telExpirar,
+        codigo: '123456',
+      }),
+    });
+    if (resCodigoExpirado.status === 400) {
+      record('17.5.1', 'Segurança Autoatendimento', 'Código expirado é rejeitado', 'Retorna 400 Bad Request com erro de código expirado', 'passou', 'Código expirado rejeitado com sucesso pelo endpoint HTTP.');
+    } else {
+      record('17.5.1', 'Segurança Autoatendimento', 'Código expirado', '400 Bad Request', 'falhou', `Status: ${resCodigoExpirado.status}`);
+    }
+
+    // 17.5.2: Código reutilizado (já verificado) é bloqueado com erro de uso único
+    const telReuso = '11977771703';
+    await telefoneVerificacaoService.solicitarCodigo({
+      estabelecimentoId: est17.id,
+      mesaId: mesa17A.id,
+      telefone: telReuso,
+    });
+    const regReuso = await db
+      .select()
+      .from(telefoneVerificacao)
+      .where(and(eq(telefoneVerificacao.estabelecimentoId, est17.id), eq(telefoneVerificacao.telefone, telReuso)))
+      .orderBy(desc(telefoneVerificacao.criadoEm))
+      .limit(1);
+
+    // Marcar como já verificado no banco
+    await db
+      .update(telefoneVerificacao)
+      .set({ status: 'verificado' })
+      .where(eq(telefoneVerificacao.id, regReuso[0].id));
+
+    const resReuso = await fetch(`${baseUrl17}/cliente/verificar-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estabelecimentoId: est17.id,
+        mesaId: mesa17A.id,
+        telefone: telReuso,
+        codigo: '123456',
+      }),
+    });
+    if (resReuso.status === 400) {
+      record('17.5.2', 'Segurança Autoatendimento', 'Código reutilizado é rejeitado', 'Retorna 400 informando que código já foi utilizado', 'passou', 'Reutilização de código evitada garantindo uso único.');
+    } else {
+      record('17.5.2', 'Segurança Autoatendimento', 'Código reutilizado', '400 Bad Request', 'falhou', `Status: ${resReuso.status}`);
+    }
+
+    // 17.5.3: Excesso de tentativas erradas (3x) bloqueia o código
+    const telTentativas = '11977771704';
+    await telefoneVerificacaoService.solicitarCodigo({
+      estabelecimentoId: est17.id,
+      mesaId: mesa17A.id,
+      telefone: telTentativas,
+    });
+    // 3 tentativas erradas
+    await fetch(`${baseUrl17}/cliente/verificar-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ estabelecimentoId: est17.id, mesaId: mesa17A.id, telefone: telTentativas, codigo: '000001' }),
+    });
+    await fetch(`${baseUrl17}/cliente/verificar-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ estabelecimentoId: est17.id, mesaId: mesa17A.id, telefone: telTentativas, codigo: '000002' }),
+    });
+    const resTentativa3 = await fetch(`${baseUrl17}/cliente/verificar-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ estabelecimentoId: est17.id, mesaId: mesa17A.id, telefone: telTentativas, codigo: '000003' }),
+    });
+    const regBloqueado = await db
+      .select()
+      .from(telefoneVerificacao)
+      .where(and(eq(telefoneVerificacao.estabelecimentoId, est17.id), eq(telefoneVerificacao.telefone, telTentativas)))
+      .orderBy(desc(telefoneVerificacao.criadoEm))
+      .limit(1);
+
+    if (resTentativa3.status === 400 && regBloqueado[0]?.status === 'bloqueado') {
+      record('17.5.3', 'Segurança Autoatendimento', '3 tentativas erradas bloqueiam código', 'Status marcado como bloqueado no banco e erro retornado', 'passou', 'Código bloqueado por excesso de tentativas.');
+    } else {
+      record('17.5.3', 'Segurança Autoatendimento', '3 tentativas erradas', 'Bloqueado', 'falhou', `Status: ${resTentativa3.status}, banco: ${regBloqueado[0]?.status}`);
+    }
+
+    // 17.6.1: Pedido legítimo com token nasce em aguardando_validacao sem garçom atribuído
+    const resPedidoLegitimo = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenMesaA}`,
+      },
+      body: JSON.stringify({
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    const dataPedLegitimo = await resPedidoLegitimo.json();
+    const pedCheckRows = await db.select().from(pedido).where(eq(pedido.id, dataPedLegitimo?.id)).limit(1);
+    const pedCheck = pedCheckRows[0];
+
+    if (
+      resPedidoLegitimo.status === 201 &&
+      pedCheck &&
+      pedCheck.statusValidacao === 'aguardando_validacao' &&
+      pedCheck.criadoPor === null
+    ) {
+      record('17.6.1', 'Segurança Autoatendimento', 'Pedido legítimo nasce em aguardando_validacao sem garçom', 'Criado com status="aguardando_validacao" e criadoPor=null', 'passou', `Pedido ${pedCheck.id} criado com sucesso em aguardando_validacao sem garçom.`);
+    } else {
+      record('17.6.1', 'Segurança Autoatendimento', 'Pedido legítimo', 'aguardando_validacao', 'falhou', `Status: ${resPedidoLegitimo.status}, validacao: ${pedCheck?.statusValidacao}`);
+    }
+
+    // 17.7.1: Token de cliente (cliente_sessao) tentando rota restrita de equipe retorna 401 ou 403
+    const resClienteEmEquipe = await fetch(`${baseUrl17}/mesas`, {
+      headers: { Authorization: `Bearer ${tokenMesaA}` },
+    });
+    if (resClienteEmEquipe.status === 401 || resClienteEmEquipe.status === 403) {
+      record('17.7.1', 'Isolamento de Papéis', 'Token de cliente tentando acessar rota de equipe', 'Retorna 401 ou 403', 'passou', `Acesso bloqueado com status HTTP ${resClienteEmEquipe.status}.`);
+    } else {
+      record('17.7.1', 'Isolamento de Papéis', 'Token de cliente tentando acessar rota de equipe', '401/403', 'falhou', `Status: ${resClienteEmEquipe.status}`);
+    }
+
+    // 17.7.2: Token de equipe usado no /cliente/pedido retorna 401
+    const staffToken17 = generateToken({
+      userId: garcom17.id,
+      estabelecimentoId: est17.id,
+      nome: garcom17.nome,
+      papel: 'garcom',
+    });
+    const resEquipeEmCliente = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${staffToken17}`,
+      },
+      body: JSON.stringify({
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    if (resEquipeEmCliente.status === 401) {
+      record('17.7.2', 'Isolamento de Papéis', 'Token de equipe usado no /cliente/pedido', 'Retorna 401 Unauthorized', 'passou', 'Token de equipe rejeitado pelo endpoint de autoatendimento do cliente.');
+    } else {
+      record('17.7.2', 'Isolamento de Papéis', 'Token de equipe no cliente/pedido', '401', 'falhou', `Status: ${resEquipeEmCliente.status}`);
+    }
+
+    // 17.7.3: Cliente tentando injetar criadoPor no corpo de /cliente/pedido é bloqueado com 403
+    const resInjetarCriadoPor = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenMesaA}`,
+      },
+      body: JSON.stringify({
+        criadoPor: garcom17.id,
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    if (resInjetarCriadoPor.status === 403) {
+      record('17.7.3', 'Segurança Autoatendimento', 'Origem autoatendimento tentando definir criadoPor', 'Retorna 403 Forbidden', 'passou', 'Tentativa de forjar criadoPor bloqueada com HTTP 403.');
+    } else {
+      record('17.7.3', 'Segurança Autoatendimento', 'Injetar criadoPor', '403 Forbidden', 'falhou', `Status: ${resInjetarCriadoPor.status}`);
+    }
+
+    // 17.7.4: Cliente tentando injetar confirmadoPresencialmente: true no corpo de /cliente/pedido é bloqueado com 403
+    const resInjetarConfPres = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenMesaA}`,
+      },
+      body: JSON.stringify({
+        confirmadoPresencialmente: true,
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    if (resInjetarConfPres.status === 403) {
+      record('17.7.4', 'Segurança Autoatendimento', 'Origem autoatendimento tentando definir confirmadoPresencialmente', 'Retorna 403 Forbidden', 'passou', 'Tentativa de forjar confirmação presencial bloqueada com HTTP 403.');
+    } else {
+      record('17.7.4', 'Segurança Autoatendimento', 'Injetar confirmação presencial', '403 Forbidden', 'falhou', `Status: ${resInjetarConfPres.status}`);
+    }
+
+    // 17.7.5: Quantidades inválidas (0, -1, 1.5, 25) retornam 400 Bad Request
+    let todasQtdsRejeitadas = true;
+    for (const invalidQtd of [0, -1, 1.5, 25]) {
+      const resQtdInvalida = await fetch(`${baseUrl17}/cliente/pedido`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${tokenMesaA}`,
+        },
+        body: JSON.stringify({
+          itens: [{ itemCardapioId: itemCardapio17.id, quantidade: invalidQtd }],
+        }),
+      });
+      if (resQtdInvalida.status !== 400) {
+        todasQtdsRejeitadas = false;
+        break;
+      }
+    }
+    if (todasQtdsRejeitadas) {
+      record('17.7.5', 'Validação de Itens', 'Quantidades inválidas (0, -1, decimal, >20)', 'Retorna 400 Bad Request', 'passou', 'Todas as quantidades inválidas (0, -1, 1.5, 25) rejeitadas com HTTP 400.');
+    } else {
+      record('17.7.5', 'Validação de Itens', 'Quantidades inválidas', '400 Bad Request', 'falhou', 'Alguma quantidade inválida foi aceita.');
+    }
+
+    // 17.7.6: Lançamento de equipe (garçom) ignora criadoPor do corpo e usa o id do token
+    const resEquipeCriadoPor = await fetch(`${baseUrl17}/pedidos/lancamento-rapido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${staffToken17}`,
+      },
+      body: JSON.stringify({
+        comandaId: cmd17A.id,
+        criadoPor: '00000000-0000-0000-0000-999999999999', // adulterado
+        origem: 'garcom',
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    const dataEquipeCriadoPor = await resEquipeCriadoPor.json();
+    const pedEquipeCheck = (await db.select().from(pedido).where(eq(pedido.id, dataEquipeCriadoPor?.id)).limit(1))[0];
+    if (
+      resEquipeCriadoPor.status === 201 &&
+      pedEquipeCheck &&
+      pedEquipeCheck.criadoPor === garcom17.id
+    ) {
+      record('17.7.6', 'Segurança Equipe', 'Lançamento de equipe força criadoPor do token de autenticação', 'criadoPor é o ID do token e não o do corpo', 'passou', `criadoPor forçado para o usuário autenticado (${pedEquipeCheck.criadoPor}).`);
+    } else {
+      record('17.7.6', 'Segurança Equipe', 'Lançamento de equipe criadoPor', 'ID do token', 'falhou', `Status: ${resEquipeCriadoPor.status}, criadoPor: ${pedEquipeCheck?.criadoPor}`);
+    }
+
+    // 17.7.7: Pedidos simultâneos não duplicam numero_exibicao (contador atômico por evento)
+    const promisesConcorrentes = Array.from({ length: 6 }, () =>
+      pedidoService.createWithRouting({
+        comandaId: cmd17A.id,
+        origem: 'operador_balcao',
+        criadoPor: garcom17.id,
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      })
+    );
+    const resultadosConcorrentes = await Promise.all(promisesConcorrentes);
+    const numerosExibicao = resultadosConcorrentes.flatMap((r) => r.itens.map((it) => it.numeroExibicao));
+    const numerosUnicos = new Set(numerosExibicao);
+    const todosFormatoCorreto = numerosExibicao.every((n) => /^P-\d+$/.test(n));
+
+    if (
+      numerosExibicao.length === 6 &&
+      numerosUnicos.size === 6 &&
+      todosFormatoCorreto
+    ) {
+      record('17.7.7', 'Contador Atômico', 'Pedidos simultâneos não duplicam numero_exibicao', '6 números únicos e sequenciais atribuídos', 'passou', `Números gerados concorrentemente: ${numerosExibicao.join(', ')} (todos distintos e válidos).`);
+    } else {
+      record('17.7.7', 'Contador Atômico', 'Pedidos simultâneos não duplicam', 'Únicos', 'falhou', `Total: ${numerosExibicao.length}, Únicos: ${numerosUnicos.size}`);
+    }
+
+    // 17.8: Rejeição de token de cliente em todas as rotas restritas de equipe
+    const rotasEquipeParaTestar = [
+      '/mesas',
+      '/clientes',
+      '/comandas',
+      '/itens-cardapio',
+      '/usuarios',
+      '/bootstrap',
+    ];
+    let todasRotasEquipeBloquearamCliente = true;
+    const falhasRotasEquipe: string[] = [];
+
+    for (const rota of rotasEquipeParaTestar) {
+      const resRota = await fetch(`${baseUrl17}${rota}`, {
+        headers: { Authorization: `Bearer ${tokenMesaA}` },
+      });
+      if (resRota.status !== 401 && resRota.status !== 403) {
+        todasRotasEquipeBloquearamCliente = false;
+        falhasRotasEquipe.push(`${rota} retornou ${resRota.status}`);
+      }
+    }
+
+    if (todasRotasEquipeBloquearamCliente) {
+      record(
+        '17.8',
+        'Isolamento de Papéis',
+        'Token de cliente rejeitado em todas as rotas de equipe',
+        'GET /mesas, /clientes, /comandas, /itens-cardapio, /usuarios, /bootstrap retornam 401 ou 403',
+        'passou',
+        `Todas as 6 rotas administrativas testadas rejeitaram o token de autoatendimento com 401/403 (${rotasEquipeParaTestar.join(', ')}).`
+      );
+    } else {
+      record(
+        '17.8',
+        'Isolamento de Papéis',
+        'Token de cliente em rotas de equipe',
+        '401 ou 403 em todas',
+        'falhou',
+        `Falhas detectadas: ${falhasRotasEquipe.join('; ')}`
+      );
+    }
+
+    // 17.9: QR da mesa: POST /mesas ignora qrCode no corpo e gera MESA-<uuid>; POST /mesas/:id/regenerar-qr invalida anterior
+    const gerente17 = await usuarioService.create({
+      estabelecimentoId: est17.id,
+      nome: `Gerente Mesas ${prefix}`,
+      email: `gerente_mesas_${prefix}@bar.com`,
+      papel: 'gerente',
+    });
+    const tokenGerente17 = generateToken({
+      userId: gerente17.id,
+      estabelecimentoId: est17.id,
+      nome: gerente17.nome,
+      papel: 'gerente',
+    });
+
+    const resCriarMesaAdulterada = await fetch(`${baseUrl17}/mesas`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenGerente17}`,
+      },
+      body: JSON.stringify({
+        estabelecimentoId: est17.id,
+        identificador: `Mesa Autogerada ${prefix}`,
+        qrCode: 'QR-ADULTERADO-PELO-CLIENTE-123', // Deve ser 100% ignorado pelo servidor
+      }),
+    });
+    const mesaCriadaJson = await resCriarMesaAdulterada.json();
+    const qrCriadoOriginal = mesaCriadaJson?.qrCode || '';
+    const qrAdulteradoIgnorado = qrCriadoOriginal !== 'QR-ADULTERADO-PELO-CLIENTE-123' && qrCriadoOriginal.startsWith('MESA-');
+
+    // Regenerar QR Code da mesa
+    const resRegenerar = await fetch(`${baseUrl17}/mesas/${mesaCriadaJson.id}/regenerar-qr`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokenGerente17}` },
+    });
+    const mesaRegeneradaJson = await resRegenerar.json();
+    const novoQrGerado = mesaRegeneradaJson?.qrCode || '';
+    const qrFoiAlterado = novoQrGerado !== qrCriadoOriginal && novoQrGerado.startsWith('MESA-');
+
+    // Valida que o QR antigo não acha mais a mesa e o novo acha
+    const resBuscaQrAntigo = await fetch(`${baseUrl17}/cliente/mesa-por-qr?qrCode=${encodeURIComponent(qrCriadoOriginal)}`);
+    const resBuscaQrNovo = await fetch(`${baseUrl17}/cliente/mesa-por-qr?qrCode=${encodeURIComponent(novoQrGerado)}`);
+
+    if (
+      resCriarMesaAdulterada.status === 201 &&
+      qrAdulteradoIgnorado &&
+      resRegenerar.status === 200 &&
+      qrFoiAlterado &&
+      resBuscaQrAntigo.status === 404 &&
+      resBuscaQrNovo.status === 200
+    ) {
+      record(
+        '17.9',
+        'Segurança Mesa QR',
+        'Servidor gera MESA-<uuid> ignorando corpo e suporta regeneração de QR',
+        'POST /mesas ignora qrCode no corpo, regenerar-qr gera novo token e invalida o anterior',
+        'passou',
+        `QR adulterado ignorado. Servidor gerou "${qrCriadoOriginal}". Regeneração produziu "${novoQrGerado}". Busca por QR antigo deu 404 e por QR novo deu 200.`
+      );
+    } else {
+      record(
+        '17.9',
+        'Segurança Mesa QR',
+        'Geração e regeneração de QR code',
+        'MESA-<uuid> gerado e anterior invalidado',
+        'falhou',
+        `criarStatus: ${resCriarMesaAdulterada.status}, qrCriado: ${qrCriadoOriginal}, regenStatus: ${resRegenerar.status}, novoQr: ${novoQrGerado}, buscaAntigo: ${resBuscaQrAntigo.status}, buscaNovo: ${resBuscaQrNovo.status}`
+      );
+    }
+
+    // 17.10: Fluxo sem SMS e caminho "Não recebi o código"
+    // 1. Obtém sessão não-verificada via /cliente/sessao-sem-codigo
+    const resSessaoSemCodigo = await fetch(`${baseUrl17}/cliente/sessao-sem-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estabelecimentoId: est17.id,
+        mesaId: mesa17A.id,
+        comandaId: cmd17A.id,
+        telefone: '11988880055',
+      }),
+    });
+    const sessaoSemCodigoJson = await resSessaoSemCodigo.json();
+    const tokenNaoVerificado = sessaoSemCodigoJson?.token;
+
+    // 2. Envia pedido com essa sessão não-verificada
+    const resPedidoSemCodigo = await fetch(`${baseUrl17}/cliente/pedido`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenNaoVerificado}`,
+      },
+      body: JSON.stringify({
+        itens: [{ itemCardapioId: itemCardapio17.id, quantidade: 1 }],
+      }),
+    });
+    const pedidoSemCodigoJson = await resPedidoSemCodigo.json();
+    const pedDbSemCodigo = (await db.select().from(pedido).where(eq(pedido.id, pedidoSemCodigoJson?.id)).limit(1))[0];
+    const itemDbAguardando = (await db.select().from(pedidoItem).where(eq(pedidoItem.pedidoId, pedidoSemCodigoJson?.id)).limit(1))[0];
+
+    // 3. Garçom tenta validação rápida de 1 toque (sem confirmação presencial) -> Deve ser RECUSADA com 400
+    const resValidacao1ToqueRecusada = await fetch(`${baseUrl17}/pedidos/${pedidoSemCodigoJson.id}/validar`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${staffToken17}`,
+      },
+      body: JSON.stringify({ confirmadoPresencialmente: false }),
+    });
+
+    // 4. Garçom valida com confirmação presencial explícita (confirmadoPresencialmente: true) -> ACEITA com 200
+    const resValidacaoPresencialAceita = await fetch(`${baseUrl17}/pedidos/${pedidoSemCodigoJson.id}/validar`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${staffToken17}`,
+      },
+      body: JSON.stringify({ confirmadoPresencialmente: true }),
+    });
+
+    const pedDbValidado = (await db.select().from(pedido).where(eq(pedido.id, pedidoSemCodigoJson?.id)).limit(1))[0];
+    const itemDbValidado = (await db.select().from(pedidoItem).where(eq(pedidoItem.pedidoId, pedidoSemCodigoJson?.id)).limit(1))[0];
+
+    if (
+      resSessaoSemCodigo.status === 200 &&
+      sessaoSemCodigoJson.verificado === false &&
+      resPedidoSemCodigo.status === 201 &&
+      pedDbSemCodigo?.telefoneVerificado === false &&
+      pedDbSemCodigo?.statusValidacao === 'aguardando_validacao' &&
+      itemDbAguardando?.numeroExibicao === 'AGUARDANDO_VALIDACAO' &&
+      resValidacao1ToqueRecusada.status === 400 &&
+      resValidacaoPresencialAceita.status === 200 &&
+      pedDbValidado?.statusValidacao === 'validado' &&
+      pedDbValidado?.telefoneVerificado === true &&
+      pedDbValidado?.confirmadoPresencialmente === true &&
+      itemDbValidado?.numeroExibicao &&
+      itemDbValidado.numeroExibicao !== 'AGUARDANDO_VALIDACAO' &&
+      itemDbValidado.status === 'pendente'
+    ) {
+      record(
+        '17.10',
+        'Fluxo sem SMS / Presencial',
+        'Sessão não-verificada exige confirmação presencial do garçom para entrar no KDS',
+        'Sessão verificado=false; pedido nasce em aguardando_validacao com telefoneVerificado=false; recusa 1 toque; aceita confirmação presencial; itens só liberados para KDS após validação',
+        'passou',
+        `Fluxo não-verificado testado com sucesso: sessão verificado=false gerada, pedido criado com telefoneVerificado=false, validação rápida sem confirmação presencial rejeitada com HTTP 400, validação presencial confirmada com HTTP 200 e itens liberados para KDS com número "${itemDbValidado?.numeroExibicao}".`
+      );
+    } else {
+      record(
+        '17.10',
+        'Fluxo sem SMS / Presencial',
+        'Sessão não-verificada e confirmação presencial',
+        'Recusa 1 toque e exige presencial',
+        'falhou',
+        `sessaoStatus: ${resSessaoSemCodigo.status}, pedidoStatus: ${resPedidoSemCodigo.status}, telVerif: ${pedDbSemCodigo?.telefoneVerificado}, 1toqueStatus: ${resValidacao1ToqueRecusada.status}, presencialStatus: ${resValidacaoPresencialAceita.status}, itemFinal: ${itemDbValidado?.numeroExibicao}`
+      );
+    }
+
+    server17.close();
+  } catch (err: any) {
+    console.error('Erro na Seção 17:', err);
+  }
+
   console.log('\n====================================================');
   console.log(`TOTAL DE TESTES EXECUTADOS: ${results.length}`);
   const passados = results.filter((r) => r.status === 'passou').length;
   const falhados = results.filter((r) => r.status === 'falhou').length;
   const diferentes = results.filter((r) => r.status === 'diferente').length;
   console.log(`PASSOU: ${passados} | FALHOU: ${falhados} | COMPORTAMENTO DIFERENTE: ${diferentes}`);
+  if (falhados > 0) {
+    console.log('\n--- DETALHES DOS TESTES QUE FALHARAM ---');
+    for (const r of results.filter((r) => r.status === 'falhou')) {
+      console.log(`ID: ${r.id} | Seção: ${r.section} | Nome: ${r.name} | Detalhes: ${r.details}`);
+    }
+    console.log('----------------------------------------\n');
+  }
   console.log('====================================================');
 
   return results;

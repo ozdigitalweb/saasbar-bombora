@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { LayoutGrid, Plus, Edit2, Trash2, QrCode, CheckCircle, Clock } from 'lucide-react';
+import { LayoutGrid, Plus, Edit2, Trash2, QrCode, RefreshCw, CheckCircle, ShieldCheck } from 'lucide-react';
 import { Mesa, Estabelecimento } from '../../types/index.ts';
 import { Badge } from '../common/Badge.tsx';
 import { Modal } from '../common/Modal.tsx';
@@ -11,13 +11,13 @@ interface MesasViewProps {
   onCreate: (data: {
     estabelecimentoId: string;
     identificador: string;
-    qrCode: string;
     status: string;
   }) => Promise<void>;
   onUpdate: (
     id: string,
-    data: { identificador?: string; qrCode?: string; status?: string }
+    data: { identificador?: string; status?: string }
   ) => Promise<void>;
+  onRegenerarQr?: (id: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }
 
@@ -26,23 +26,24 @@ export const MesasView: React.FC<MesasViewProps> = ({
   currentEstabelecimento,
   onCreate,
   onUpdate,
+  onRegenerarQr,
   onDelete,
 }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Mesa | null>(null);
   const [itemToDelete, setItemToDelete] = useState<Mesa | null>(null);
+  const [mesaToRegenerate, setMesaToRegenerate] = useState<Mesa | null>(null);
 
   const [identificador, setIdentificador] = useState('');
-  const [qrCode, setQrCode] = useState('');
   const [status, setStatus] = useState('livre');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
 
   const openCreateModal = () => {
     setEditingItem(null);
     const nextNum = mesas.length + 1;
     const formattedNum = nextNum < 10 ? `0${nextNum}` : `${nextNum}`;
     setIdentificador(`Mesa ${formattedNum}`);
-    setQrCode(`QR-MESA-${formattedNum}`);
     setStatus('livre');
     setIsModalOpen(true);
   };
@@ -50,34 +51,42 @@ export const MesasView: React.FC<MesasViewProps> = ({
   const openEditModal = (mesa: Mesa) => {
     setEditingItem(mesa);
     setIdentificador(mesa.identificador);
-    setQrCode(mesa.qrCode);
     setStatus(mesa.status);
     setIsModalOpen(true);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!identificador.trim() || !qrCode.trim() || !currentEstabelecimento) return;
+    if (!identificador.trim() || !currentEstabelecimento) return;
 
     setIsSubmitting(true);
     try {
       if (editingItem) {
         await onUpdate(editingItem.id, {
           identificador: identificador.trim(),
-          qrCode: qrCode.trim(),
           status,
         });
       } else {
         await onCreate({
           estabelecimentoId: currentEstabelecimento.id,
           identificador: identificador.trim(),
-          qrCode: qrCode.trim(),
           status,
         });
       }
       setIsModalOpen(false);
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleConfirmRegenerarQr = async () => {
+    if (!mesaToRegenerate || !onRegenerarQr) return;
+    setIsRegenerating(true);
+    try {
+      await onRegenerarQr(mesaToRegenerate.id);
+      setMesaToRegenerate(null);
+    } finally {
+      setIsRegenerating(false);
     }
   };
 
@@ -103,12 +112,12 @@ export const MesasView: React.FC<MesasViewProps> = ({
             Mesas & Autoatendimento QR
           </h1>
           <p className="text-[0.875rem] text-[#64748B] mt-1">
-            Mesas, espreguiçadeiras e gazebos habilitados para autoatendimento via QR code.
+            Mesas, espreguiçadeiras e gazebos com QR code criptográfico de alta entropia gerado pelo servidor.
           </p>
         </div>
         <button
           onClick={openCreateModal}
-          className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#0D9488] hover:bg-[#0F766E] text-white rounded-[10px] text-[0.875rem] font-medium transition-colors shadow-xs"
+          className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#0D9488] hover:bg-[#0F766E] text-white rounded-[10px] text-[0.875rem] font-medium transition-colors shadow-xs cursor-pointer"
         >
           <Plus className="w-4 h-4" />
           Nova Mesa
@@ -132,9 +141,9 @@ export const MesasView: React.FC<MesasViewProps> = ({
               <h3 className="text-[1.125rem] font-semibold text-[#0F172A]">
                 {mesa.identificador}
               </h3>
-              <div className="flex items-center gap-1.5 mt-2 bg-slate-50 px-2 py-1 rounded-[6px] border border-slate-200">
-                <QrCode className="w-3.5 h-3.5 text-[#0D9488]" />
-                <span className="font-mono text-xs text-[#334155] font-medium truncate">
+              <div className="flex items-center gap-1.5 mt-2 bg-slate-50 px-2.5 py-1.5 rounded-[6px] border border-slate-200">
+                <QrCode className="w-4 h-4 text-[#0D9488] shrink-0" />
+                <span className="font-mono text-xs text-[#334155] font-medium truncate" title={mesa.qrCode}>
                   {mesa.qrCode}
                 </span>
               </div>
@@ -143,10 +152,20 @@ export const MesasView: React.FC<MesasViewProps> = ({
             <div className="flex items-center justify-between pt-3 mt-3 border-t border-[#E2E8F0]">
               <span className="text-[11px] text-[#64748B]">Autoatendimento</span>
               <div className="flex items-center gap-1">
+                {onRegenerarQr && (
+                  <button
+                    type="button"
+                    onClick={() => setMesaToRegenerate(mesa)}
+                    className="p-1.5 text-[#64748B] hover:text-[#0D9488] hover:bg-teal-50 rounded-[6px] transition-colors cursor-pointer"
+                    title="Gerar novo QR Code (invalida o anterior)"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => openEditModal(mesa)}
-                  className="p-1.5 text-[#64748B] hover:text-[#0F172A] hover:bg-slate-100 rounded-[6px] transition-colors"
+                  className="p-1.5 text-[#64748B] hover:text-[#0F172A] hover:bg-slate-100 rounded-[6px] transition-colors cursor-pointer"
                   title="Editar"
                 >
                   <Edit2 className="w-4 h-4" />
@@ -154,7 +173,7 @@ export const MesasView: React.FC<MesasViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setItemToDelete(mesa)}
-                  className="p-1.5 text-[#64748B] hover:text-[#DC2626] hover:bg-red-50 rounded-[6px] transition-colors"
+                  className="p-1.5 text-[#64748B] hover:text-[#DC2626] hover:bg-red-50 rounded-[6px] transition-colors cursor-pointer"
                   title="Excluir"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -168,12 +187,12 @@ export const MesasView: React.FC<MesasViewProps> = ({
           <div className="col-span-full bg-white rounded-[10px] border border-dashed border-[#E2E8F0] p-12 text-center text-[#64748B]">
             <LayoutGrid className="w-10 h-10 mx-auto text-slate-300 mb-2" />
             <p className="font-medium text-[#0F172A]">Nenhuma mesa cadastrada</p>
-            <p className="text-xs mt-1">Cadastre as mesas para gerar os QR codes de autoatendimento.</p>
+            <p className="text-xs mt-1">Cadastre as mesas para gerar os QR codes automáticos de autoatendimento.</p>
           </div>
         )}
       </div>
 
-      {/* Modal */}
+      {/* Modal Criar / Editar */}
       <Modal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
@@ -195,22 +214,30 @@ export const MesasView: React.FC<MesasViewProps> = ({
             />
           </div>
 
-          <div>
-            <label className="block text-[0.875rem] font-medium text-[#0F172A] mb-1">
-              Código do QR Code Impresso *
-            </label>
-            <input
-              type="text"
-              required
-              value={qrCode}
-              onChange={(e) => setQrCode(e.target.value)}
-              placeholder="Ex: QR-MESA-01"
-              className="w-full px-3.5 py-2 border border-[#E2E8F0] rounded-[6px] text-[0.875rem] font-mono focus:outline-none focus:ring-2 focus:ring-[#0D9488]"
-            />
-            <span className="text-[11px] text-[#64748B] mt-1 block">
-              Código unívoco impresso na plaqueta física da mesa.
-            </span>
-          </div>
+          {editingItem ? (
+            <div className="bg-slate-50 p-3 rounded-[8px] border border-slate-200">
+              <span className="block text-xs font-semibold text-[#0F172A] mb-1">
+                QR Code Atual da Plaqueta
+              </span>
+              <div className="flex items-center gap-2">
+                <QrCode className="w-4 h-4 text-[#0D9488]" />
+                <span className="font-mono text-xs text-[#334155] font-semibold break-all">
+                  {editingItem.qrCode}
+                </span>
+              </div>
+              <span className="text-[11px] text-[#64748B] mt-1.5 block">
+                Por segurança, o QR Code é gerado exclusivamente pelo servidor. Para trocá-lo, utilize o botão "Gerar novo QR" no card da mesa.
+              </span>
+            </div>
+          ) : (
+            <div className="bg-teal-50 border border-teal-200 p-3 rounded-[8px] flex items-start gap-2.5">
+              <ShieldCheck className="w-5 h-5 text-[#0D9488] shrink-0 mt-0.5" />
+              <div className="text-xs text-teal-900 leading-relaxed">
+                <span className="font-semibold block mb-0.5">Geração Criptográfica Automática</span>
+                O servidor gerará automaticamente um token unívoco de alta entropia (<code className="font-mono bg-teal-100/60 px-1 py-0.5 rounded">MESA-&lt;uuid&gt;</code>) contra adivinhação e falsificação.
+              </div>
+            </div>
+          )}
 
           <div>
             <label className="block text-[0.875rem] font-medium text-[#0F172A] mb-1">
@@ -231,20 +258,29 @@ export const MesasView: React.FC<MesasViewProps> = ({
             <button
               type="button"
               onClick={() => setIsModalOpen(false)}
-              className="px-4 py-2 border border-[#E2E8F0] text-[#334155] rounded-[10px] text-[0.875rem] font-medium hover:bg-slate-50 transition-colors"
+              className="px-4 py-2 border border-[#E2E8F0] text-[#334155] rounded-[10px] text-[0.875rem] font-medium hover:bg-slate-50 transition-colors cursor-pointer"
             >
               Cancelar
             </button>
             <button
               type="submit"
               disabled={isSubmitting}
-              className="px-5 py-2 bg-[#0D9488] hover:bg-[#0F766E] text-white rounded-[10px] text-[0.875rem] font-medium transition-colors disabled:opacity-50"
+              className="px-5 py-2 bg-[#0D9488] hover:bg-[#0F766E] text-white rounded-[10px] text-[0.875rem] font-medium transition-colors disabled:opacity-50 cursor-pointer"
             >
               {isSubmitting ? 'Salvando...' : 'Salvar Mesa'}
             </button>
           </div>
         </form>
       </Modal>
+
+      {/* Confirmar Regeneração do QR Code */}
+      <ConfirmDialog
+        isOpen={!!mesaToRegenerate}
+        onClose={() => setMesaToRegenerate(null)}
+        onConfirm={handleConfirmRegenerarQr}
+        title="Gerar Novo QR Code"
+        description={`Tem certeza que deseja gerar um novo QR Code para a "${mesaToRegenerate?.identificador}"? O código atual (${mesaToRegenerate?.qrCode}) será invalidado imediatamente e placas impressas anteriores deixarão de funcionar.`}
+      />
 
       {/* Confirm Delete */}
       <ConfirmDialog

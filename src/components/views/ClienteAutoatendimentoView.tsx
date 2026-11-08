@@ -92,6 +92,13 @@ export const ClienteAutoatendimentoView: React.FC<ClienteAutoatendimentoViewProp
   const [erroCodigo, setErroCodigo] = useState<string | null>(null);
   const [tentativasCodigo, setTentativasCodigo] = useState(0);
   const [clienteReconhecido, setClienteReconhecido] = useState<any>(null);
+  const [clienteSessaoToken, setClienteSessaoToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('saasbar_cliente_token');
+    } catch {
+      return null;
+    }
+  });
 
   // Custom observation modal for item
   const [selectedItemForObs, setSelectedItemForObs] = useState<ItemCardapio | null>(null);
@@ -264,6 +271,12 @@ export const ClienteAutoatendimentoView: React.FC<ClienteAutoatendimentoViewProp
       });
       if (res.canal) setCanalEnvio(res.canal);
       setSegundosCooldown(res.segundosParaReenvio || 60);
+      if (res.envioIndisponivel) {
+        setErroCodigo(
+          res.mensagem ||
+            'Envio de SMS/WhatsApp indisponível. Toque em "Não recebi o código" abaixo para enviar seu pedido com confirmação presencial do garçom.'
+        );
+      }
     } catch (err: any) {
       setErroCodigo(err.message || 'Erro ao enviar código de verificação.');
     } finally {
@@ -308,6 +321,12 @@ export const ClienteAutoatendimentoView: React.FC<ClienteAutoatendimentoViewProp
       });
 
       // Sucesso na verificação!
+      if (res.token) {
+        setClienteSessaoToken(res.token);
+        try {
+          localStorage.setItem('saasbar_cliente_token', res.token);
+        } catch {}
+      }
       setSessaoMesaVerificada(true);
       setVerificacaoMetodoSessao(res.verificacaoMetodo || canalEnvio);
       if (res.cliente) {
@@ -319,6 +338,7 @@ export const ClienteAutoatendimentoView: React.FC<ClienteAutoatendimentoViewProp
       await processarEnvioPedido({
         telefoneVerificado: true,
         verificacaoMetodo: res.verificacaoMetodo || canalEnvio,
+        token: res.token,
       });
 
       setFeedbackSuccess(
@@ -337,13 +357,35 @@ export const ClienteAutoatendimentoView: React.FC<ClienteAutoatendimentoViewProp
   // Regra: "Código que não chegou: o cliente toca em ‘Não recebi o código’ e o pedido é enviado marcado como ‘telefone não verificado’."
   const handleNaoRecebiCodigo = async () => {
     setIsVerificacaoModalOpen(false);
-    await processarEnvioPedido({
-      telefoneVerificado: false,
-      codigoNaoRecebido: true,
-    });
-    setFeedbackNaoVerificado(
-      'Pedido enviado! Como o código não foi confirmado por SMS/WhatsApp, o garçom confirmará seu telefone presencialmente na mesa antes de liberar para o preparo.'
-    );
+    setIsSubmittingOrder(true);
+    try {
+      // Requisito 7: Emite token de sessão não-verificada (tipo cliente_sessao, verificado: false)
+      const resSessao = await api.sessaoSemCodigo({
+        estabelecimentoId: selectedMesa?.estabelecimentoId || currentEstabelecimentoId,
+        mesaId: selectedMesa?.id || selectedMesaId,
+        comandaId: comandaMesa?.id,
+        telefone: telefoneInformado || undefined,
+      });
+
+      if (resSessao?.token) {
+        setClienteSessaoToken(resSessao.token);
+      }
+
+      await processarEnvioPedido({
+        telefoneVerificado: false,
+        codigoNaoRecebido: true,
+        token: resSessao.token,
+      });
+
+      setFeedbackNaoVerificado(
+        'Pedido enviado! Como o código não foi confirmado por SMS/WhatsApp, o garçom confirmará seu telefone presencialmente na mesa antes de liberar para o preparo.'
+      );
+    } catch (err: any) {
+      console.error('Erro ao emitir sessão sem código:', err);
+      alert('Erro ao enviar pedido sem código: ' + (err.message || 'Tente novamente'));
+    } finally {
+      setIsSubmittingOrder(false);
+    }
   };
 
   // Executa o envio do pedido ao backend
@@ -351,19 +393,23 @@ export const ClienteAutoatendimentoView: React.FC<ClienteAutoatendimentoViewProp
     telefoneVerificado: boolean;
     codigoNaoRecebido?: boolean;
     verificacaoMetodo?: string;
+    token?: string;
   }) => {
     setIsSubmittingOrder(true);
     try {
-      await api.lancamentoRapido({
+      const tokenEfetivo = opts.token || clienteSessaoToken;
+      if (!tokenEfetivo) {
+        throw new Error('Sessão não verificada. Por favor, confirme seu telefone para enviar o pedido.');
+      }
+      await api.clientePedido({
+        token: tokenEfetivo,
+        mesaId: selectedMesa?.id || '',
         comandaId: comandaMesa.id,
-        origem: 'autoatendimento',
+        estabelecimentoId: selectedMesa?.estabelecimentoId || currentEstabelecimentoId,
         itens: cart.map((ci) => ({
           itemCardapioId: ci.item.id,
           quantidade: ci.quantidade,
         })),
-        telefone: telefoneInformado,
-        telefoneVerificado: opts.telefoneVerificado,
-        codigoNaoRecebido: opts.codigoNaoRecebido,
       });
 
       setCart([]);

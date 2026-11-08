@@ -58,11 +58,83 @@ export function generateToken(payload: TokenPayload): string {
 
 export function verifyToken(token: string): TokenPayload | null {
   try {
-    const payload = jwt.verify(token, getJwtSecret()) as TokenPayload;
-    if (payload && payload.userId && !payload.id) {
+    const payload = jwt.verify(token, getJwtSecret()) as any;
+    if (!payload || payload.tipo === 'cliente_sessao') {
+      return null;
+    }
+    if (!payload.userId || !payload.papel || !payload.estabelecimentoId) {
+      return null;
+    }
+    if (payload.userId && !payload.id) {
       payload.id = payload.userId;
     }
-    return payload;
+    return payload as TokenPayload;
+  } catch (error) {
+    return null;
+  }
+}
+
+// ==========================================
+// CLIENT AUTOATENDIMENTO (MESA QR) SESSION TOKEN
+// ==========================================
+export interface ClientSessionTokenPayload {
+  tipo: 'cliente_sessao';
+  estabelecimentoId: string;
+  mesaId: string;
+  comandaId?: string;
+  telefone?: string;
+  clienteId?: string;
+  verificado: boolean;
+}
+
+/**
+ * Cria token de sessão para o cliente na mesa com validade curta (2 horas).
+ * Preso a estabelecimentoId, mesaId, comandaId e opcionalmente telefone do cliente.
+ * Pode ser verificado (via OTP) ou não-verificado (fluxo sem SMS ou "não recebi o código").
+ */
+export function generateClientSessionToken(payload: {
+  estabelecimentoId: string;
+  mesaId: string;
+  comandaId?: string;
+  telefone?: string;
+  clienteId?: string;
+  verificado?: boolean;
+}): string {
+  return jwt.sign(
+    {
+      ...payload,
+      tipo: 'cliente_sessao',
+      verificado: payload.verificado !== false,
+    },
+    getJwtSecret(),
+    { expiresIn: '2h' } // 2 horas de duração
+  );
+}
+
+/**
+ * Valida o token de sessão do cliente na mesa.
+ * Retorna o payload se válido ou null se inválido/expirado/tipo divergente/token de equipe.
+ */
+export function verifyClientSessionToken(token: string): ClientSessionTokenPayload | null {
+  try {
+    const payload = jwt.verify(token, getJwtSecret()) as any;
+    if (
+      payload &&
+      payload.tipo === 'cliente_sessao' &&
+      payload.estabelecimentoId &&
+      payload.mesaId
+    ) {
+      return {
+        tipo: 'cliente_sessao',
+        estabelecimentoId: payload.estabelecimentoId,
+        mesaId: payload.mesaId,
+        comandaId: payload.comandaId,
+        telefone: payload.telefone,
+        clienteId: payload.clienteId,
+        verificado: payload.verificado !== false,
+      };
+    }
+    return null;
   } catch (error) {
     return null;
   }
@@ -88,6 +160,9 @@ export function requireRole(allowedRoles: Array<'garcom' | 'gerente' | 'operador
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     if (!req.user) {
       return res.status(401).json({ error: 'Não autenticado' });
+    }
+    if ((req.user as any).tipo === 'cliente_sessao') {
+      return res.status(403).json({ error: 'Acesso negado para tokens de autoatendimento.' });
     }
     if (!allowedRoles.includes(req.user.papel)) {
       return res.status(403).json({

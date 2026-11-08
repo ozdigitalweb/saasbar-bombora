@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { eq, ne, desc, asc, and, ilike, or, inArray } from 'drizzle-orm';
+import { eq, ne, desc, asc, and, ilike, or, inArray, sql } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import { normalizarCelular, mascararCelular } from './rate-limiter.ts';
 import {
@@ -336,7 +336,8 @@ export const mesaService = {
     status?: string;
   }) {
     try {
-      const generatedQr = data.qrCode || `MESA-${crypto.randomUUID()}`;
+      // Requisito 3: O servidor SEMPRE gera MESA-<uuid aleatório> e ignora qualquer qrCode do corpo
+      const generatedQr = `MESA-${crypto.randomUUID()}`;
       const rows = await db
         .insert(mesa)
         .values({
@@ -358,15 +359,36 @@ export const mesaService = {
     data: { identificador?: string; qrCode?: string; status?: string }
   ) {
     try {
+      // Requisito 3: qrCode vindo do corpo é sempre ignorado em PUT
+      const updateData: { identificador?: string; status?: string } = {};
+      if (data.identificador !== undefined) updateData.identificador = data.identificador;
+      if (data.status !== undefined) updateData.status = data.status;
+
       const rows = await db
         .update(mesa)
-        .set(data)
+        .set(updateData)
         .where(eq(mesa.id, id))
         .returning();
       return rows[0] || null;
     } catch (error) {
       console.error(`Error in mesaService.update(${id}):`, error);
       throw new Error('Falha ao atualizar mesa.', { cause: error });
+    }
+  },
+
+  async regenerarQrCode(id: string) {
+    try {
+      // Requisito 3: Invalida o QR code anterior gerando um novo identificador MESA-<uuid>
+      const novoQrCode = `MESA-${crypto.randomUUID()}`;
+      const rows = await db
+        .update(mesa)
+        .set({ qrCode: novoQrCode })
+        .where(eq(mesa.id, id))
+        .returning();
+      return rows[0] || null;
+    } catch (error) {
+      console.error(`Error in mesaService.regenerarQrCode(${id}):`, error);
+      throw new Error('Falha ao regenerar QR code da mesa.', { cause: error });
     }
   },
 
@@ -1235,18 +1257,20 @@ export const comandaService = {
     }
   },
 
-  async findByMesa(mesaId: string, eventoId: string) {
+  async findByMesa(mesaId: string, eventoId?: string) {
     try {
+      const conditions = [
+        eq(comanda.mesaId, mesaId),
+        eq(comanda.status, 'aberta'),
+      ];
+      if (eventoId) {
+        conditions.push(eq(comanda.eventoId, eventoId));
+      }
       const rows = await db
         .select({ id: comanda.id })
         .from(comanda)
-        .where(
-          and(
-            eq(comanda.mesaId, mesaId),
-            eq(comanda.eventoId, eventoId),
-            eq(comanda.status, 'aberta')
-          )
-        )
+        .where(and(...conditions))
+        .orderBy(desc(comanda.abertaEm))
         .limit(1);
 
       if (rows.length === 0) return null;
@@ -1345,6 +1369,84 @@ export const comandaService = {
 };
 
 // ==========================================
+// CONTADOR ATÔMICO DE NÚMEROS DE EXIBIÇÃO POR EVENTO
+// Seguro contra pedidos simultâneos (fila serializada com mutex por evento + seed por evento)
+// ==========================================
+interface EventCounter {
+  nextSeq: number;
+  initialized: boolean;
+  lock: Promise<void>;
+}
+
+const eventCounters = new Map<string, EventCounter>();
+
+export async function obterProximosNumerosExibicao(
+  eventoId: string,
+  quantidade: number
+): Promise<number[]> {
+  if (quantidade <= 0) return [];
+  const eventKey = String(eventoId || 'default').trim();
+
+  let counter = eventCounters.get(eventKey);
+  if (!counter) {
+    counter = {
+      nextSeq: 101,
+      initialized: false,
+      lock: Promise.resolve(),
+    };
+    eventCounters.set(eventKey, counter);
+  }
+
+  // Enfileira a execução para garantir atomicidade total contra pedidos simultâneos
+  const currentLock = counter.lock;
+  let releaseLock: () => void = () => {};
+  counter.lock = new Promise<void>((resolve) => {
+    releaseLock = resolve;
+  });
+
+  await currentLock;
+
+  try {
+    if (!counter.initialized) {
+      try {
+        const queryRes = await db.execute(sql`
+          SELECT COALESCE(
+            MAX(
+              CASE 
+                WHEN pi.numero_exibicao ~ '^P-[0-9]+$' 
+                THEN CAST(SUBSTRING(pi.numero_exibicao FROM 3) AS INTEGER)
+                ELSE 100 
+              END
+            ), 
+            100
+          )::integer AS max_seq
+          FROM pedido_item pi
+          JOIN pedido p ON pi.pedido_id = p.id
+          JOIN comanda c ON p.comanda_id = c.id
+          WHERE c.evento_id::text = ${eventKey} OR c.estabelecimento_id::text = ${eventKey};
+        `);
+        const maxSeq = Number((queryRes.rows[0] as any)?.max_seq ?? 100);
+        counter.nextSeq = Math.max(101, maxSeq + 1);
+      } catch {
+        counter.nextSeq = 101;
+      }
+      counter.initialized = true;
+    }
+
+    const start = counter.nextSeq;
+    counter.nextSeq += quantidade;
+
+    const nums: number[] = [];
+    for (let i = 0; i < quantidade; i++) {
+      nums.push(start + i);
+    }
+    return nums;
+  } finally {
+    releaseLock();
+  }
+}
+
+// ==========================================
 // 11. PEDIDO & KDS ROUTING REPOSITORY
 // ==========================================
 export const pedidoService = {
@@ -1373,8 +1475,21 @@ export const pedidoService = {
     statusValidacao?: 'aguardando_validacao' | 'validado' | 'recusado' | 'pendente';
   }) {
     try {
-      if (data.itens.length === 0) {
+      if (!Array.isArray(data.itens) || data.itens.length === 0) {
         throw new Error('O pedido deve conter pelo menos um item.');
+      }
+      if (data.itens.length > 30) {
+        throw new Error('O pedido excede o limite máximo de 30 itens.');
+      }
+
+      for (const it of data.itens) {
+        if (!it.itemCardapioId) {
+          throw new Error('itemCardapioId é obrigatório para todos os itens.');
+        }
+        const qtd = Number(it.quantidade);
+        if (!Number.isInteger(qtd) || qtd < 1 || qtd > 20) {
+          throw new Error('A quantidade de cada item deve ser um número inteiro entre 1 e 20.');
+        }
       }
 
       // Server-side validation of comanda state (never trust frontend)
@@ -1476,19 +1591,28 @@ export const pedidoService = {
 
       const cardapioMap = new Map(cardapioRows.map((r) => [r.id, r]));
 
-      // 3. Generate sequential display number
-      const countRows = await db.select().from(pedidoItem);
-      let seq = countRows.length + 101;
+      // 3. Generate sequential display number atomically per event (safe against concurrent requests)
+      const isAguardando = stValidacao === 'aguardando_validacao';
+      const eventKey = cmd.eventoId || cmd.estabelecimentoId || 'default';
+      const seqNumbers = !isAguardando
+        ? await obterProximosNumerosExibicao(eventKey, data.itens.length)
+        : [];
+      let seqIdx = 0;
 
       // 4. Insert each PedidoItem with automatic routing to ponto_de_preparo
       // Regra Seção 14: pedido aguardando validação não gera numero_exibicao de preparo até ser validado pelo garçom
-      const isAguardando = stValidacao === 'aguardando_validacao';
       const itemsToInsert = data.itens.map((it) => {
         const itemInfo = cardapioMap.get(it.itemCardapioId);
         if (!itemInfo) {
           throw new Error(`Item de cardápio ${it.itemCardapioId} não encontrado.`);
         }
-        const numeroExibicao = isAguardando ? 'AGUARDANDO_VALIDACAO' : `P-${seq++}`;
+        if (itemInfo.estabelecimentoId !== cmd.estabelecimentoId) {
+          throw new Error('Item de cardápio pertence a outro estabelecimento.');
+        }
+        if ((itemInfo as any).ativo === false || (itemInfo as any).status === 'inativo') {
+          throw new Error(`O item "${itemInfo.nome}" está indisponível ou inativo no cardápio.`);
+        }
+        const numeroExibicao = isAguardando ? 'AGUARDANDO_VALIDACAO' : `P-${seqNumbers[seqIdx++]}`;
 
         return {
           pedidoId: novoPedido.id,
@@ -4658,8 +4782,8 @@ export const telefoneVerificacaoService = {
         expiraEm,
         segundosParaReenvio: 60,
         telefoneMascarado: mascararTelefone(telNormalizado),
-        // Código retornado apenas para facilidade de testes em ambiente de teste/debug
-        codigoDebug: codigo,
+        // Código retornado apenas para facilidade de testes em ambiente de teste/debug (nunca em produção)
+        codigoDebug: process.env.NODE_ENV === 'production' ? undefined : codigo,
       };
     } catch (error) {
       console.error('Error in telefoneVerificacaoService.solicitarCodigo:', error);
@@ -4817,6 +4941,9 @@ export const telefoneVerificacaoService = {
       return {
         sucesso: true,
         verificado: true,
+        estabelecimentoId: data.estabelecimentoId,
+        mesaId: data.mesaId || verif.mesaId || null,
+        comandaId: comandaAtualizadaId || null,
         telefone: telNormalizado,
         telefoneMascarado: mascararTelefone(telNormalizado),
         verificacaoMetodo: verif.canal,
@@ -4906,24 +5033,28 @@ export const telefoneVerificacaoService = {
           `[AUDITORIA][CONFIRMACAO_PRESENCIAL] Pedido ${ped.id} da comanda ${ped.comandaId} confirmado presencialmente pelo garçom ${data.garcomId}`
         );
 
-        // Regra Seção 14: validar gera numero_exibicao por item
+        // Regra Seção 14: validar gera numero_exibicao atômico por evento por item
         const itensPendentes = await db
           .select()
           .from(pedidoItem)
           .where(eq(pedidoItem.pedidoId, data.pedidoId));
 
-        const countTotal = await db.select().from(pedidoItem);
-        let seq = countTotal.length + 101;
+        const itensParaNumerar = itensPendentes.filter(
+          (it) => !it.numeroExibicao || it.numeroExibicao === 'AGUARDANDO_VALIDACAO'
+        );
 
-        for (const it of itensPendentes) {
-          if (!it.numeroExibicao || it.numeroExibicao === 'AGUARDANDO_VALIDACAO') {
+        if (itensParaNumerar.length > 0) {
+          const cmdPed = await comandaService.getById(ped.comandaId);
+          const evtKey = cmdPed?.eventoId || ped.estabelecimentoId || 'default';
+          const seqs = await obterProximosNumerosExibicao(evtKey, itensParaNumerar.length);
+          for (let i = 0; i < itensParaNumerar.length; i++) {
             await db
               .update(pedidoItem)
               .set({
-                numeroExibicao: `P-${seq++}`,
+                numeroExibicao: `P-${seqs[i]}`,
                 status: 'pendente',
               })
-              .where(eq(pedidoItem.id, it.id));
+              .where(eq(pedidoItem.id, itensParaNumerar[i].id));
           }
         }
 
@@ -4946,24 +5077,28 @@ export const telefoneVerificacaoService = {
           .where(eq(pedido.id, data.pedidoId))
           .returning();
 
-        // Regra Seção 14: validar gera numero_exibicao por item
+        // Regra Seção 14: validar gera numero_exibicao atômico por evento por item
         const itensPendentes = await db
           .select()
           .from(pedidoItem)
           .where(eq(pedidoItem.pedidoId, data.pedidoId));
 
-        const countTotal = await db.select().from(pedidoItem);
-        let seq = countTotal.length + 101;
+        const itensParaNumerar = itensPendentes.filter(
+          (it) => !it.numeroExibicao || it.numeroExibicao === 'AGUARDANDO_VALIDACAO'
+        );
 
-        for (const it of itensPendentes) {
-          if (!it.numeroExibicao || it.numeroExibicao === 'AGUARDANDO_VALIDACAO') {
+        if (itensParaNumerar.length > 0) {
+          const cmdPed = await comandaService.getById(ped.comandaId);
+          const evtKey = cmdPed?.eventoId || ped.estabelecimentoId || 'default';
+          const seqs = await obterProximosNumerosExibicao(evtKey, itensParaNumerar.length);
+          for (let i = 0; i < itensParaNumerar.length; i++) {
             await db
               .update(pedidoItem)
               .set({
-                numeroExibicao: `P-${seq++}`,
+                numeroExibicao: `P-${seqs[i]}`,
                 status: 'pendente',
               })
-              .where(eq(pedidoItem.id, it.id));
+              .where(eq(pedidoItem.id, itensParaNumerar[i].id));
           }
         }
 
