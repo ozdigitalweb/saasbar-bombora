@@ -176,23 +176,33 @@ export const pontoDePreparoService = {
   },
 };
 
+// Helper para sanitizar objetos de usuário e nunca vazar senhaHash em nenhuma resposta
+export function sanitizeUsuario<T extends Record<string, any>>(user: T | null): Omit<T, 'senhaHash'> | null {
+  if (!user) return null;
+  const { senhaHash, ...rest } = user;
+  return rest;
+}
+
 // 3. USUARIO REPOSITORY
 export const usuarioService = {
   async getAll(estabelecimentoId?: string, papel?: 'garcom' | 'gerente' | 'operador_balcao') {
     try {
       let query = db.select().from(usuario);
+      let rows;
       if (estabelecimentoId && papel) {
-        return await query
+        rows = await query
           .where(and(eq(usuario.estabelecimentoId, estabelecimentoId), eq(usuario.papel, papel)))
           .orderBy(asc(usuario.nome));
       } else if (estabelecimentoId) {
-        return await query
+        rows = await query
           .where(eq(usuario.estabelecimentoId, estabelecimentoId))
           .orderBy(asc(usuario.nome));
       } else if (papel) {
-        return await query.where(eq(usuario.papel, papel)).orderBy(asc(usuario.nome));
+        rows = await query.where(eq(usuario.papel, papel)).orderBy(asc(usuario.nome));
+      } else {
+        rows = await query.orderBy(asc(usuario.nome));
       }
-      return await query.orderBy(asc(usuario.nome));
+      return rows.map((u) => sanitizeUsuario(u)!);
     } catch (error) {
       console.error('Error in usuarioService.getAll:', error);
       throw new Error('Falha ao listar usuários.', { cause: error });
@@ -202,7 +212,7 @@ export const usuarioService = {
   async getById(id: string) {
     try {
       const rows = await db.select().from(usuario).where(eq(usuario.id, id)).limit(1);
-      return rows[0] || null;
+      return sanitizeUsuario(rows[0]) || null;
     } catch (error) {
       console.error(`Error in usuarioService.getById(${id}):`, error);
       throw new Error('Falha ao buscar usuário.', { cause: error });
@@ -210,10 +220,29 @@ export const usuarioService = {
   },
 
   async findByLogin(login: string, estabelecimentoId?: string) {
+    const raw = await this.findByLoginForAuth(login, estabelecimentoId);
+    return sanitizeUsuario(raw);
+  },
+
+  async findByLoginForAuth(login: string, estabelecimentoId?: string) {
     try {
       const clean = login.trim();
+      const normalizedPhone = normalizarTelefone(clean);
+      const lowerEmail = clean.toLowerCase();
+      const phoneDigits = clean.replace(/\D/g, '');
+
+      const matchConditions = [
+        eq(usuario.email, lowerEmail),
+      ];
+      if (normalizedPhone) {
+        matchConditions.push(eq(usuario.celular, normalizedPhone));
+      }
+      if (phoneDigits && phoneDigits !== normalizedPhone) {
+        matchConditions.push(eq(usuario.celular, phoneDigits));
+      }
+
       const conditions = [
-        or(eq(usuario.email, clean), eq(usuario.celular, clean))
+        or(...matchConditions)
       ];
       if (estabelecimentoId) {
         conditions.push(eq(usuario.estabelecimentoId, estabelecimentoId));
@@ -248,12 +277,12 @@ export const usuarioService = {
           estabelecimentoId: data.estabelecimentoId,
           nome: data.nome,
           papel: data.papel,
-          celular: data.celular || null,
-          email: data.email || null,
+          celular: data.celular ? normalizarTelefone(data.celular) : null,
+          email: data.email ? data.email.trim().toLowerCase() : null,
           senhaHash: data.senhaHash,
         })
         .returning();
-      return rows[0];
+      return sanitizeUsuario(rows[0])!;
     } catch (error: any) {
       console.error('Error in usuarioService.create:', error);
       if (error?.message?.includes('senhaHash é obrigatório')) {
@@ -274,12 +303,23 @@ export const usuarioService = {
     }
   ) {
     try {
+      const updateData: any = {};
+      if (data.nome !== undefined) updateData.nome = data.nome;
+      if (data.papel !== undefined) updateData.papel = data.papel;
+      if (data.celular !== undefined) {
+        updateData.celular = data.celular ? normalizarTelefone(data.celular) : null;
+      }
+      if (data.email !== undefined) {
+        updateData.email = data.email ? data.email.trim().toLowerCase() : null;
+      }
+      if (data.senhaHash !== undefined) updateData.senhaHash = data.senhaHash;
+
       const rows = await db
         .update(usuario)
-        .set(data)
+        .set(updateData)
         .where(eq(usuario.id, id))
         .returning();
-      return rows[0] || null;
+      return sanitizeUsuario(rows[0]) || null;
     } catch (error) {
       console.error(`Error in usuarioService.update(${id}):`, error);
       throw new Error('Falha ao atualizar usuário.', { cause: error });
@@ -289,7 +329,7 @@ export const usuarioService = {
   async delete(id: string) {
     try {
       const rows = await db.delete(usuario).where(eq(usuario.id, id)).returning();
-      return rows[0] || null;
+      return sanitizeUsuario(rows[0]) || null;
     } catch (error) {
       console.error(`Error in usuarioService.delete(${id}):`, error);
       throw new Error('Falha ao excluir usuário.', { cause: error });
@@ -539,7 +579,8 @@ export const clienteService = {
 
   async findByCelular(celular: string, estabelecimentoId?: string) {
     try {
-      const cleanPhone = celular.replace(/\D/g, '');
+      const normalizedPhone = normalizarTelefone(celular);
+      const cleanPhone = (celular || '').replace(/\D/g, '');
       const query = db.select().from(cliente);
       const conditions = [];
       if (estabelecimentoId) {
@@ -548,7 +589,12 @@ export const clienteService = {
       const all = await query.where(conditions.length > 0 ? and(...conditions) : undefined);
       const match = all.find((c) => {
         const cPhone = (c.celular || '').replace(/\D/g, '');
-        return cPhone === cleanPhone || (cleanPhone.length >= 8 && cPhone.endsWith(cleanPhone));
+        return (
+          cPhone === normalizedPhone ||
+          cPhone === cleanPhone ||
+          (cleanPhone.length >= 8 && cPhone.endsWith(cleanPhone)) ||
+          (normalizedPhone.length >= 8 && cPhone.endsWith(normalizedPhone.slice(-8)))
+        );
       });
       return match || null;
     } catch (error) {
@@ -564,13 +610,13 @@ export const clienteService = {
     email?: string;
   }) {
     try {
-      const cleanPhone = data.celular.replace(/\D/g, '');
-      const existing = await this.findByCelular(cleanPhone, data.estabelecimentoId);
+      const normalizedPhone = normalizarTelefone(data.celular);
+      const existing = await this.findByCelular(normalizedPhone, data.estabelecimentoId);
       if (existing) {
         if (data.nome && existing.nome !== data.nome) {
           const updated = await this.update(existing.id, {
             nome: data.nome,
-            email: data.email || existing.email || undefined,
+            email: data.email ? data.email.trim().toLowerCase() : existing.email || undefined,
           });
           return updated || existing;
         }
@@ -579,8 +625,8 @@ export const clienteService = {
       return await this.create({
         estabelecimentoId: data.estabelecimentoId,
         nome: data.nome,
-        celular: cleanPhone,
-        email: data.email,
+        celular: normalizedPhone,
+        email: data.email ? data.email.trim().toLowerCase() : undefined,
       });
     } catch (error) {
       console.error('Error in clienteService.findOrCreate:', error);
@@ -595,13 +641,14 @@ export const clienteService = {
     email?: string;
   }) {
     try {
+      const normalizedPhone = normalizarTelefone(data.celular);
       const rows = await db
         .insert(cliente)
         .values({
           estabelecimentoId: data.estabelecimentoId,
           nome: data.nome,
-          celular: data.celular,
-          email: data.email || null,
+          celular: normalizedPhone,
+          email: data.email ? data.email.trim().toLowerCase() : null,
         })
         .returning();
       return rows[0];
@@ -616,9 +663,17 @@ export const clienteService = {
     data: { nome?: string; celular?: string; email?: string }
   ) {
     try {
+      const updateData: any = {};
+      if (data.nome !== undefined) updateData.nome = data.nome;
+      if (data.celular !== undefined) {
+        updateData.celular = data.celular ? normalizarTelefone(data.celular) : data.celular;
+      }
+      if (data.email !== undefined) {
+        updateData.email = data.email ? data.email.trim().toLowerCase() : null;
+      }
       const rows = await db
         .update(cliente)
-        .set(data)
+        .set(updateData)
         .where(eq(cliente.id, id))
         .returning();
       return rows[0] || null;
@@ -4482,22 +4537,38 @@ export const conciliacaoService = {
 // ==========================================
 
 export function mascararTelefone(telefone: string): string {
-  const digitos = String(telefone || '').replace(/\D/g, '');
+  let digitos = String(telefone || '').replace(/\D/g, '');
   if (!digitos) return '***';
+  if (digitos.startsWith('55') && (digitos.length === 12 || digitos.length === 13)) {
+    digitos = digitos.substring(2);
+  }
   if (digitos.length >= 10) {
     const ddd = digitos.slice(0, 2);
     const ultimos4 = digitos.slice(-4);
-    return `(${ddd}) *****-${ultimos4}`;
+    return `+55 (${ddd}) *****-${ultimos4}`;
   }
-  return `(${digitos.slice(0, 2)}) *****-${digitos.slice(-4)}`;
+  return `+55 *****-${digitos.slice(-4)}`;
 }
 
 export function normalizarTelefone(telefone: string): string {
   let digitos = String(telefone || '').replace(/\D/g, '');
+  if (!digitos) return '';
+  // Se já começa com 55 e possui 12 ou 13 dígitos
   if (digitos.startsWith('55') && (digitos.length === 12 || digitos.length === 13)) {
-    digitos = digitos.substring(2);
+    return digitos;
   }
-  return digitos;
+  // Remove 0 inicial de DDD se houver (ex.: 011987654321 -> 11987654321)
+  if (digitos.startsWith('0') && (digitos.length === 11 || digitos.length === 12)) {
+    digitos = digitos.substring(1);
+  }
+  // 10 dígitos (DDD + fixo) ou 11 dígitos (DDD + celular 9 dígitos) -> adiciona 55 (padrão 13 dígitos)
+  if (digitos.length === 10 || digitos.length === 11) {
+    return `55${digitos}`;
+  }
+  if (digitos.length === 9) {
+    return digitos;
+  }
+  return digitos.startsWith('55') ? digitos : `55${digitos}`;
 }
 
 export interface CodigoSimuladoRegistro {
@@ -4724,7 +4795,7 @@ export const telefoneVerificacaoService = {
         );
       }
 
-      // Regra 3: Rate limit por IP (máx 15 por hora no estabelecimento)
+      // Regra 3: Rate limit por IP (máx 1000 por hora no estabelecimento para suportar múltiplos clientes no mesmo Wi-Fi)
       if (data.ip) {
         const enviosPorIp = await db
           .select()
@@ -4738,7 +4809,7 @@ export const telefoneVerificacaoService = {
         const enviosIpCount = enviosPorIp.filter(
           (e) => new Date(e.criadoEm).getTime() >= umaHoraAtras.getTime()
         ).length;
-        if (enviosIpCount >= 15) {
+        if (enviosIpCount >= 1000) {
           throw new Error('Limite de solicitações por IP excedido. Tente novamente mais tarde.');
         }
       }
@@ -4916,9 +4987,9 @@ export const telefoneVerificacaoService = {
         })
         .where(eq(telefoneVerificacao.id, verif.id));
 
-      // Atualizar comanda da mesa se fornecida ou vinculada
-      let comandaAtualizadaId = data.comandaId || verif.comandaId;
-      if (!comandaAtualizadaId && data.mesaId) {
+      // Atualizar comanda da mesa: descobre a comanda aberta da mesa e valida contra divergência
+      let comandaAtualizadaId: string | undefined = undefined;
+      if (data.mesaId) {
         // Encontrar comanda aberta da mesa
         const cmdMesa = await db
           .select({ id: comanda.id })
@@ -4927,6 +4998,11 @@ export const telefoneVerificacaoService = {
           .orderBy(desc(comanda.abertaEm))
           .limit(1);
         if (cmdMesa[0]) comandaAtualizadaId = cmdMesa[0].id;
+        if (data.comandaId && comandaAtualizadaId && data.comandaId !== comandaAtualizadaId) {
+          throw new Error('comandaId fornecido não pertence a esta mesa.');
+        }
+      } else if (data.comandaId || verif.comandaId) {
+        comandaAtualizadaId = data.comandaId || verif.comandaId || undefined;
       }
 
       if (comandaAtualizadaId) {

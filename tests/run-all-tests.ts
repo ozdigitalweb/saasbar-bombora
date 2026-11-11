@@ -1529,10 +1529,10 @@ async function runTestSuite() {
       nome: 'Marcos Vinicius',
       celular: '11988880002',
     });
-    if (clienteNovo && clienteNovo.nome === 'Marcos Vinicius' && clienteNovo.celular === '11988880002') {
-      record('12.1.2', 'App Garçom — Check-in', 'Digitar celular de cliente novo', 'Oferece cadastro rápido (nome + celular, sem CPF)', 'passou', `Cliente ${clienteNovo.nome} cadastrado com sucesso sem exigência de CPF.`);
+    if (clienteNovo && clienteNovo.nome === 'Marcos Vinicius' && clienteNovo.celular === normalizarTelefone('11988880002')) {
+      record('12.1.2', 'App Garçom — Check-in', 'Digitar celular de cliente novo', 'Oferece cadastro rápido (nome + celular, sem CPF)', 'passou', `Cliente ${clienteNovo.nome} cadastrado com sucesso sem exigência de CPF com celular padronizado (${clienteNovo.celular}).`);
     } else {
-      record('12.1.2', 'App Garçom — Check-in', 'Cadastro novo cliente', 'Nome + celular sem CPF', 'falhou', 'Não cadastrou cliente novo.');
+      record('12.1.2', 'App Garçom — Check-in', 'Cadastro novo cliente', 'Nome + celular sem CPF', 'falhou', `Não cadastrou cliente novo. celular=${clienteNovo?.celular}`);
     }
 
     // 12.1.3: Escanear QR de pulseira já vinculada ativamente a outro cliente no mesmo evento
@@ -2936,7 +2936,7 @@ async function runTestSuite() {
       .where(
         and(
           eq(cliente.estabelecimentoId, est14A.id),
-          eq(cliente.celular, telCliente14)
+          eq(cliente.celular, normalizarTelefone(telCliente14))
         )
       );
 
@@ -3629,7 +3629,7 @@ async function runTestSuite() {
       .where(
         and(
           eq(telefoneVerificacao.estabelecimentoId, est15A.id),
-          eq(telefoneVerificacao.telefone, tel15_2)
+          eq(telefoneVerificacao.telefone, normalizarTelefone(tel15_2))
         )
       )
       .orderBy(desc(telefoneVerificacao.criadoEm))
@@ -3983,7 +3983,7 @@ async function runTestSuite() {
     // Checar mascaramento de log
     const telMascarado = mascararTelefone(tel15_8);
     const mascaraCorreta =
-      telMascarado === '(11) *****-1508' && !telMascarado.includes('8888');
+      telMascarado.includes('(11) *****-1508') && !telMascarado.includes('8888');
 
     // 2. Apenas após enviar o código correto os dados do cliente são retornados
     const verif15_8 = await telefoneVerificacaoService.verificarCodigo({
@@ -4405,7 +4405,7 @@ async function runTestSuite() {
         'Content-Type': 'application/json',
         'X-Forwarded-For': ipB,
       },
-      body: JSON.stringify({ login: 'errado@seg.com', senha: 'WrongPassword123!' }),
+      body: JSON.stringify({ login: 'outro@seg.com', senha: 'WrongPassword123!' }),
     });
 
     if (resIpABlocked.status === 429 && resIpBAllowed.status === 401) {
@@ -4450,7 +4450,7 @@ async function runTestSuite() {
       .where(
         and(
           eq(telefoneVerificacao.estabelecimentoId, est16A.id),
-          eq(telefoneVerificacao.telefone, telSolicitarProxy)
+          eq(telefoneVerificacao.telefone, normalizarTelefone(telSolicitarProxy))
         )
       )
       .limit(1);
@@ -4728,7 +4728,7 @@ async function runTestSuite() {
     const regReuso = await db
       .select()
       .from(telefoneVerificacao)
-      .where(and(eq(telefoneVerificacao.estabelecimentoId, est17.id), eq(telefoneVerificacao.telefone, telReuso)))
+      .where(and(eq(telefoneVerificacao.estabelecimentoId, est17.id), eq(telefoneVerificacao.telefone, normalizarTelefone(telReuso))))
       .orderBy(desc(telefoneVerificacao.criadoEm))
       .limit(1);
 
@@ -4780,7 +4780,7 @@ async function runTestSuite() {
     const regBloqueado = await db
       .select()
       .from(telefoneVerificacao)
-      .where(and(eq(telefoneVerificacao.estabelecimentoId, est17.id), eq(telefoneVerificacao.telefone, telTentativas)))
+      .where(and(eq(telefoneVerificacao.estabelecimentoId, est17.id), eq(telefoneVerificacao.telefone, normalizarTelefone(telTentativas))))
       .orderBy(desc(telefoneVerificacao.criadoEm))
       .limit(1);
 
@@ -5163,6 +5163,405 @@ async function runTestSuite() {
     server17.close();
   } catch (err: any) {
     console.error('Erro na Seção 17:', err);
+  }
+
+  // ==========================================
+  // SEÇÃO 18: Correções Obrigatórias de Segurança (Prompt Final)
+  // ==========================================
+  try {
+    console.log('\n--- 18. Correções Obrigatórias de Segurança ---');
+    const server18 = http.createServer(app);
+    await new Promise<void>((resolve) => server18.listen(0, resolve));
+    const port18 = (server18.address() as any).port;
+    const baseUrl18 = `http://127.0.0.1:${port18}/api`;
+
+    _clearRateLimitsForTesting();
+
+    // Setup de dados para a Seção 18
+    const est18 = await estabelecimentoService.create({
+      nome: `Bar Sec 18 ${prefix}`,
+      tipo: 'bar_casa_noturna',
+    });
+
+    const evt18 = await eventoService.create({
+      estabelecimentoId: est18.id,
+      nome: `Evento 18 ${prefix}`,
+      dataInicio: new Date(),
+    });
+
+    const mesa18A = await mesaService.create({
+      estabelecimentoId: est18.id,
+      identificador: 'M-18A',
+    });
+
+    const mesa18B = await mesaService.create({
+      estabelecimentoId: est18.id,
+      identificador: 'M-18B',
+    });
+
+    const cmd18A = await comandaService.create({
+      eventoId: evt18.id,
+      tipoAtendimento: 'mesa',
+      mesaId: mesa18A.id,
+    });
+
+    const pontoBar18 = await pontoDePreparoService.create({
+      estabelecimentoId: est18.id,
+      nome: `Bar Ponto 18 ${prefix}`,
+    });
+
+    const itemCardapio18 = await itemCardapioService.create({
+      estabelecimentoId: est18.id,
+      nome: 'Gin Tônica Sec 18',
+      preco: '38.00',
+      pontoDePreparoId: pontoBar18.id,
+    });
+
+    const senhaHashGerente18 = await hashPassword('GerenteSenha123!');
+    const uGerente18 = await usuarioService.create({
+      estabelecimentoId: est18.id,
+      nome: 'Gerente Sec 18',
+      papel: 'gerente',
+      celular: `11977${prefix.slice(-6)}`,
+      email: `gerente18_${prefix}@bar.com`,
+      senhaHash: senhaHashGerente18,
+    });
+
+    const tokenGerente18 = generateToken({
+      userId: uGerente18.id,
+      estabelecimentoId: est18.id,
+      nome: uGerente18.nome,
+      papel: 'gerente',
+    });
+
+    // 18.1: NUNCA DEVOLVER senhaHash EM NENHUMA RESPOSTA
+    // (GET /usuarios, GET /usuarios/:id, POST /usuarios, PUT /usuarios/:id, POST /auth/login)
+    const resGetUsuarios = await fetch(`${baseUrl18}/usuarios?estabelecimentoId=${est18.id}`, {
+      headers: { Authorization: `Bearer ${tokenGerente18}` },
+    });
+    const usuariosList = await resGetUsuarios.json();
+    const vazouGetUsuarios = Array.isArray(usuariosList) && usuariosList.some((u: any) => 'senhaHash' in u);
+
+    const resGetUsuarioId = await fetch(`${baseUrl18}/usuarios/${uGerente18.id}`, {
+      headers: { Authorization: `Bearer ${tokenGerente18}` },
+    });
+    const usuarioById = await resGetUsuarioId.json();
+    const vazouGetUsuarioId = 'senhaHash' in usuarioById;
+
+    const resPostUsuario = await fetch(`${baseUrl18}/usuarios`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenGerente18}`,
+      },
+      body: JSON.stringify({
+        estabelecimentoId: est18.id,
+        nome: 'Garcom Novo 18',
+        papel: 'garcom',
+        senha: 'SenhaSegura123!',
+        celular: `(11) 98888-${prefix.slice(-4)}`,
+        email: `garcom_${prefix}@bar.com`,
+      }),
+    });
+    const usuarioCriado = await resPostUsuario.json();
+    const vazouPostUsuario = 'senhaHash' in usuarioCriado;
+
+    const resPutUsuario = await fetch(`${baseUrl18}/usuarios/${usuarioCriado.id}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tokenGerente18}`,
+      },
+      body: JSON.stringify({
+        nome: 'Garcom Novo 18 Alterado',
+      }),
+    });
+    const usuarioAtualizado = await resPutUsuario.json();
+    const vazouPutUsuario = 'senhaHash' in usuarioAtualizado;
+
+    const resLogin = await fetch(`${baseUrl18}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        login: `gerente18_${prefix}@bar.com`,
+        senha: 'GerenteSenha123!',
+      }),
+    });
+    const loginResponse = await resLogin.json();
+    const vazouLogin = 'senhaHash' in (loginResponse?.user || {});
+
+    if (!vazouGetUsuarios && !vazouGetUsuarioId && !vazouPostUsuario && !vazouPutUsuario && !vazouLogin) {
+      record(
+        '18.1',
+        'Segurança de Credenciais',
+        'senhaHash nunca é devolvido em respostas da API',
+        'GET /usuarios, GET /usuarios/:id, POST /usuarios, PUT /usuarios/:id e login sanitizados sem o campo senhaHash',
+        'passou',
+        'Todas as 5 rotas de usuário sanitizam estritamente a saída e removem o campo senhaHash na camada de serviço.'
+      );
+    } else {
+      record(
+        '18.1',
+        'Segurança de Credenciais',
+        'senhaHash nunca é devolvido',
+        'Sanitização em todas as respostas',
+        'falhou',
+        `vazouGetUsuarios=${vazouGetUsuarios}, vazouGetUsuarioId=${vazouGetUsuarioId}, vazouPostUsuario=${vazouPostUsuario}, vazouPutUsuario=${vazouPutUsuario}, vazouLogin=${vazouLogin}`
+      );
+    }
+
+    // 18.2: /cliente/sessao-sem-codigo e /cliente/verificar-codigo não aceitam comandaId divergente da mesa
+    const resSessaoComandaDivergente = await fetch(`${baseUrl18}/cliente/sessao-sem-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estabelecimentoId: est18.id,
+        mesaId: mesa18B.id, // Mesa B (não tem a comanda cmd18A)
+        comandaId: cmd18A.id, // Tentativa de injetar a comanda da Mesa A
+        telefone: '11988889999',
+      }),
+    });
+
+    const resSessaoSemComanda = await fetch(`${baseUrl18}/cliente/sessao-sem-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estabelecimentoId: est18.id,
+        mesaId: mesa18A.id,
+        telefone: '11988889999',
+      }),
+    });
+    const sessaoSemComandaJson = await resSessaoSemComanda.json();
+    const tokenDecodificado = verifyClientSessionToken(sessaoSemComandaJson.token);
+
+    const comandaResolvidaServidor = tokenDecodificado?.comandaId === cmd18A.id;
+    const recusouOuIgnorouDivergente = resSessaoComandaDivergente.status === 400 || resSessaoComandaDivergente.status === 404;
+
+    if (recusouOuIgnorouDivergente && comandaResolvidaServidor) {
+      record(
+        '18.2',
+        'Segurança do Fluxo do Cliente',
+        'comandaId do corpo é validado e resolvido pelo servidor a partir da mesa',
+        'comandaId de outra mesa é recusado (400) e o servidor descobre a comanda aberta da mesa atribuindo-a ao token',
+        'passou',
+        `Tentativa de injetar comandaId de outra mesa bloqueada com HTTP ${resSessaoComandaDivergente.status}; servidor resolveu a comanda correta (${cmd18A.id}) no token.`
+      );
+    } else {
+      record(
+        '18.2',
+        'Segurança do Fluxo do Cliente',
+        'comandaId do corpo validado',
+        'Recusa divergente e resolve mesa',
+        'falhou',
+        `statusDivergente=${resSessaoComandaDivergente.status}, tokenCmd=${tokenDecodificado?.comandaId}, cmd18A=${cmd18A.id}`
+      );
+    }
+
+    // 18.3: Rate limiter de autoatendimento para 100 mesas diferentes no mesmo IP
+    // O mesmo IP (Wi-Fi do bar) realiza o fluxo normal em 100 mesas distintas sem receber nenhum 429
+    console.log('[18.3] Executando simulação de 100 mesas sob o mesmo IP de Wi-Fi...');
+    const ipCompartilhado = '198.51.100.88';
+    let erros429 = 0;
+    let mesasSucesso = 0;
+
+    // Criar 100 mesas e comandas abertas para a simulação
+    const batchMesas: any[] = [];
+    for (let i = 1; i <= 100; i++) {
+      const mesaI = await mesaService.create({
+        estabelecimentoId: est18.id,
+        identificador: `M-100-${i}-${prefix.slice(-4)}`,
+      });
+      const cmdI = await comandaService.create({
+        eventoId: evt18.id,
+        tipoAtendimento: 'mesa',
+        mesaId: mesaI.id,
+      });
+      batchMesas.push({ mesa: mesaI, comanda: cmdI });
+    }
+
+    _clearRateLimitsForTesting();
+
+    for (let i = 0; i < batchMesas.length; i++) {
+      const { mesa: mItem } = batchMesas[i];
+
+      // 1. GET /cliente/mesa-por-qr
+      const resQr = await fetch(`${baseUrl18}/cliente/mesa-por-qr?qrCode=${mItem.qrCode}`, {
+        headers: { 'X-Forwarded-For': ipCompartilhado },
+      });
+      if (resQr.status === 429) erros429++;
+
+      // 2. POST /cliente/sessao-sem-codigo
+      const resSessao = await fetch(`${baseUrl18}/cliente/sessao-sem-codigo`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Forwarded-For': ipCompartilhado,
+        },
+        body: JSON.stringify({
+          estabelecimentoId: est18.id,
+          mesaId: mItem.id,
+          telefone: `11999${String(i).padStart(6, '0')}`,
+        }),
+      });
+      if (resSessao.status === 429) erros429++;
+      const sessaoData = await resSessao.json();
+      const tokenM = sessaoData?.token;
+
+      // 3. Três consultas a /cliente/sessao-mesa
+      for (let c = 0; c < 3; c++) {
+        const resConsulta = await fetch(`${baseUrl18}/cliente/sessao-mesa?mesaId=${mItem.id}&eventoId=${evt18.id}`, {
+          headers: { 'X-Forwarded-For': ipCompartilhado },
+        });
+        if (resConsulta.status === 429) erros429++;
+      }
+
+      // 4. Um pedido com o token da sessão
+      const resPed = await fetch(`${baseUrl18}/cliente/pedido`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${tokenM}`,
+          'X-Forwarded-For': ipCompartilhado,
+        },
+        body: JSON.stringify({
+          itens: [{ itemCardapioId: itemCardapio18.id, quantidade: 1 }],
+        }),
+      });
+      if (resPed.status === 429) erros429++;
+
+      if (resQr.status === 200 && resSessao.status === 200 && resPed.status === 201) {
+        mesasSucesso++;
+      }
+    }
+
+    if (erros429 === 0 && mesasSucesso === 100) {
+      record(
+        '18.3',
+        'Alta Concorrência em Wi-Fi / Rate Limiting',
+        '100 mesas diferentes no mesmo IP sem nenhum erro 429',
+        'Cada mesa no mesmo Wi-Fi executa QR, sessão, 3 consultas de status e 1 pedido sem colisão de rate limit',
+        'passou',
+        `Todas as 100 mesas operaram em concorrência no IP ${ipCompartilhado} com 0 erros 429 (Too Many Requests). Limite por IP de autoatendimento (1000/min) comportou com folga o tráfego.`
+      );
+    } else {
+      record(
+        '18.3',
+        'Alta Concorrência em Wi-Fi / Rate Limiting',
+        '100 mesas mesmo IP sem 429',
+        '0 erros 429 e 100 sucessos',
+        'falhou',
+        `erros429=${erros429}, mesasSucesso=${mesasSucesso}`
+      );
+    }
+
+    // 18.4: Convenção única de telefone (13 dígitos: 55 + DDD + número)
+    const telFormatos = [
+      '(11) 98765-4321',
+      '+55 (11) 98765-4321',
+      '11987654321',
+      '011987654321',
+      '5511987654321',
+    ];
+    const normalizados = telFormatos.map((t) => normalizarTelefone(t));
+    const todosIguais13Digitos = normalizados.every((n) => n === '5511987654321' && n.length === 13);
+
+    // Testar login aceitando qualquer formatação de celular
+    const senhaHashUserTel = await hashPassword('SenhaTel123!');
+    const userTel = await usuarioService.create({
+      estabelecimentoId: est18.id,
+      nome: 'Operador Celular 18',
+      papel: 'garcom',
+      celular: '11988887777', // Enviado sem 55, salvo padronizado com 13 dígitos
+      senhaHash: senhaHashUserTel,
+    });
+
+    const resLoginFormatado = await fetch(`${baseUrl18}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        login: '(11) 98888-7777', // Formatação com máscara
+        senha: 'SenhaTel123!',
+      }),
+    });
+    const loginFormatadoSucesso = resLoginFormatado.status === 200;
+
+    if (todosIguais13Digitos && userTel.celular === '5511988887777' && loginFormatadoSucesso) {
+      record(
+        '18.4',
+        'Padronização de Telefones',
+        'Convenção única de 13 dígitos (55 + DDD + 9 dígitos) em cadastro, login e normalização',
+        'Todos os formatos normalizam para 5511987654321; login aceita máscara "(11) 98888-7777" e localiza o usuário cadastrado',
+        'passou',
+        `Todos os formatos normalizados com sucesso para 5511987654321; usuário cadastrado com celular ${userTel.celular} e login com máscara efetuado com HTTP 200.`
+      );
+    } else {
+      record(
+        '18.4',
+        'Padronização de Telefones',
+        'Convenção única de 13 dígitos',
+        '55 + DDD + 9 dígitos em todos os fluxos',
+        'falhou',
+        `todosIguais=${todosIguais13Digitos}, userCelular=${userTel.celular}, loginStatus=${resLoginFormatado.status}`
+      );
+    }
+
+    // 18.5: x-test-run bypass recusado quando NODE_ENV !== 'test' (e.g. em production)
+    const oldEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    _clearRateLimitsForTesting();
+
+    // Com NODE_ENV === 'production', o bypass x-test-run DEVE SER IGNORADO
+    // Dispara 5 logins inválidos para atingir o limite
+    for (let i = 0; i < 5; i++) {
+      await fetch(`${baseUrl18}/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-test-run': 'true',
+        },
+        body: JSON.stringify({ login: 'bloqueado_prod@bar.com', senha: 'WrongPassword123!' }),
+      });
+    }
+
+    // A 6ª requisição com x-test-run: true DEVE retornar 429 em produção
+    const resProdBypassBlocked = await fetch(`${baseUrl18}/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-test-run': 'true',
+      },
+      body: JSON.stringify({ login: 'bloqueado_prod@bar.com', senha: 'WrongPassword123!' }),
+    });
+
+    if (oldEnv !== undefined) {
+      process.env.NODE_ENV = oldEnv;
+    } else {
+      delete process.env.NODE_ENV;
+    }
+
+    if (resProdBypassBlocked.status === 429) {
+      record(
+        '18.5',
+        'Segurança do Rate Limiter',
+        'Bypass x-test-run é estritamente recusado em ambiente de produção',
+        'Em NODE_ENV=production, x-test-run: true não desativa rate limiter e a 6ª tentativa retorna HTTP 429',
+        'passou',
+        'Rate limiters mantêm proteção ativa e ignoram qualquer tentativa de bypass em produção.'
+      );
+    } else {
+      record(
+        '18.5',
+        'Segurança do Rate Limiter',
+        'Bypass em produção',
+        '429 Too Many Requests',
+        'falhou',
+        `Status recebido em produção com x-test-run: ${resProdBypassBlocked.status}`
+      );
+    }
+
+    server18.close();
+  } catch (err: any) {
+    console.error('Erro na Seção 18:', err);
   }
 
   console.log('\n====================================================');

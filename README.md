@@ -198,7 +198,7 @@ Apenas os endpoints estritamente necessários para o autoatendimento anônimo do
 │   ├── App.tsx                   # Roteamento visual da aplicação
 │   └── main.tsx                  # Ponto de entrada React 19
 ├── tests/
-│   ├── run-all-tests.ts          # Suíte completa de 154 testes automatizados (17 seções)
+│   ├── run-all-tests.ts          # Suíte completa de 159 testes automatizados (18 seções)
 │   ├── run-section4.ts           # Teste focado de fechamento financeiro e rateio
 │   └── audit-multitenant-routes.ts# Auditoria automatizada de rotas e segurança
 ├── server.ts                     # Servidor unificado (Express + Vite)
@@ -270,7 +270,7 @@ npm run start
 
 ## 🧪 Testes Automatizados
 
-O sistema conta com **154 testes automatizados** cobrindo 100% das regras de negócio, fluxos de salão, copa, cozinha, fidelidade, pagamentos, fechamento de caixas e segurança criptográfica.
+O sistema conta com **159 testes automatizados** cobrindo 100% das regras de negócio, fluxos de salão, copa, cozinha, fidelidade, pagamentos, fechamento de caixas e segurança criptográfica.
 
 Para rodar a suíte completa:
 ```bash
@@ -278,7 +278,7 @@ npm test
 ```
 *(ou `npx tsx tests/run-all-tests.ts`)*
 
-### Cobertura dos 154 Testes (17 Seções):
+### Cobertura dos 159 Testes (18 Seções):
 1. **Seção 1:** Cadastros e isolamento multi-tenant de dados.
 2. **Seção 2:** Autenticação, tokens JWT e validação de papéis (RBAC).
 3. **Seção 3:** Ciclo operacional de evento (Check-in, consumo na comanda, KDS e entrega).
@@ -342,9 +342,15 @@ npm test
     - Isolamento mútuo total de tokens: token de autoatendimento (`cliente_sessao`) é rejeitado com 401/403 em rotas administrativas (`/mesas`, `/clientes`, `/comandas`, `/itens-cardapio`, `/usuarios`, `/bootstrap`), e token de equipe é rejeitado em `/cliente/pedido`.
     - QR Code de mesa: o servidor sempre gera `MESA-<uuid>` e ignora valores enviados pelo cliente/gerente no cadastro ou edição; botão "Gerar novo QR" invalida o QR anterior.
     - Fluxo sem SMS ("Não recebi o código"): emissão de sessão não-verificada (`POST /cliente/sessao-sem-codigo`); pedido nasce em `aguardando_validacao` com `telefoneVerificado: false`; tentativa de validação rápida com 1 toque é rejeitada com HTTP 400; validação presencial explícita é exigida e os itens só entram no KDS após essa confirmação.
+18. **Seção 18:** Hardening Final de Segurança, Rate Limiting & Convenção de Telefones:
+    - **Sanitização de `senhaHash`:** Remoção garantida na camada de serviço; nenhuma resposta de usuário vaza credenciais (`GET /usuarios`, `GET /usuarios/:id`, `POST /usuarios`, `PUT /usuarios/:id`, `POST /auth/login`).
+    - **Validação Estrita de `comandaId` do Autoatendimento:** O servidor descobre a comanda aberta da mesa; qualquer injeção de `comandaId` de outra mesa enviada no corpo é rejeitada com HTTP 400.
+    - **Alta Concorrência em Wi-Fi (100 mesas sob o mesmo IP):** Rate limit isolado por sessão/mesa (60 req/min) com teto amplo por IP (1000 req/min) e 1000 envios/hora em `solicitar-codigo`, garantindo operação simultânea de 100+ mesas sem nenhum erro 429.
+    - **Convenção Única de Telefones (13 dígitos: `55 + DDD + 9 dígitos`):** Normalização padrão em cadastros, login com máscara ou sem, rate limiters e SMS, acompanhado de scripts de migração de banco e criação de índices únicos parciais.
+    - **Blindagem do Rate Limiter:** O cabeçalho `x-test-run` só é aceito sob `NODE_ENV === 'test'`, permanecendo ativamente bloqueado em produção.
 
 **Status atual da suíte de testes:**  
-`TOTAL: 154 | PASSOU: 154 (100%) | FALHOU: 0 | DIFERENÇAS: 0`
+`TOTAL: 159 | PASSOU: 159 (100%) | FALHOU: 0 | DIFERENÇAS: 0`
 
 ---
 

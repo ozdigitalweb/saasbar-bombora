@@ -23,6 +23,7 @@ import {
   telefoneVerificacaoService,
   mascararTelefone,
   normalizarTelefone,
+  sanitizeUsuario,
 } from './db-services.ts';
 import {
   hashPassword,
@@ -103,7 +104,7 @@ apiRouter.post('/auth/login', loginRateLimiter, async (req: Request, res: Respon
       return res.status(400).json({ error: 'Informe o celular ou e-mail e a senha.' });
     }
 
-    const user = await usuarioService.findByLogin(login.trim(), estabelecimentoId);
+    const user = await usuarioService.findByLoginForAuth(login.trim(), estabelecimentoId);
     if (!user) {
       return res.status(401).json({ error: 'Credenciais inválidas. Verifique seus dados de acesso.' });
     }
@@ -122,14 +123,7 @@ apiRouter.post('/auth/login', loginRateLimiter, async (req: Request, res: Respon
 
     res.json({
       token,
-      user: {
-        id: user.id,
-        estabelecimentoId: user.estabelecimentoId,
-        nome: user.nome,
-        papel: user.papel,
-        celular: user.celular,
-        email: user.email,
-      },
+      user: sanitizeUsuario(user),
     });
   } catch (error: any) {
     console.error('Login error:', error);
@@ -1127,7 +1121,7 @@ apiRouter.put('/comandas/:id/status', requireRole(['gerente', 'operador_balcao']
 // Rota pública segura para o autoatendimento localizar mesa pelo QR token de alta entropia
 apiRouter.get('/cliente/mesa-por-qr', autoatendimentoRateLimiter, async (req: Request, res: Response) => {
   try {
-    const { qrCode } = req.query;
+    const qrCode = (req.query.qrCode || req.query.qr) as string;
     if (!qrCode || typeof qrCode !== 'string') {
       return res.status(400).json({ error: 'QR Code da mesa é obrigatório.' });
     }
@@ -1201,10 +1195,17 @@ apiRouter.post('/cliente/sessao-sem-codigo', autoatendimentoRateLimiter, async (
       return res.status(404).json({ error: 'Mesa não encontrada para este estabelecimento.' });
     }
 
+    // O servidor descobre a comanda aberta daquela mesa e coloca no token só o que ele mesmo resolveu.
+    const comandaAberta = await comandaService.findByMesa(mesaId);
+    if (comandaId && (!comandaAberta || comandaId !== comandaAberta.id)) {
+      return res.status(400).json({ error: 'comandaId fornecido não pertence a esta mesa.' });
+    }
+    const resolvedComandaId = comandaAberta ? comandaAberta.id : undefined;
+
     const sessaoToken = generateClientSessionToken({
       estabelecimentoId,
       mesaId,
-      comandaId: comandaId || undefined,
+      comandaId: resolvedComandaId,
       telefone: telefone ? normalizarTelefone(telefone) : undefined,
       verificado: false,
     });
@@ -1230,20 +1231,33 @@ apiRouter.post('/cliente/verificar-codigo', autoatendimentoRateLimiter, async (r
       return res.status(400).json({ error: 'estabelecimentoId, telefone e codigo são obrigatórios.' });
     }
 
+    // Se mesaId fornecida, descobre comanda aberta e valida divergência com comandaId do corpo
+    let resolvedComandaId: string | undefined = undefined;
+    if (mesaId) {
+      const comandaAberta = await comandaService.findByMesa(mesaId);
+      if (comandaAberta) {
+        resolvedComandaId = comandaAberta.id;
+      }
+      if (comandaId && (!resolvedComandaId || comandaId !== resolvedComandaId)) {
+        return res.status(400).json({ error: 'comandaId fornecido não pertence a esta mesa.' });
+      }
+    }
+
     const resultado = await telefoneVerificacaoService.verificarCodigo({
       estabelecimentoId,
       mesaId,
-      comandaId,
+      comandaId: resolvedComandaId,
       telefone,
       codigo,
     });
 
     // Gera token assinado de sessão (curta duração: 2 horas) preso ao estabelecimentoId, mesaId, comandaId e telefone
     const targetMesaId = mesaId || resultado.mesaId || '';
+    const finalComandaId = resultado.comandaId || resolvedComandaId;
     const sessaoToken = generateClientSessionToken({
       estabelecimentoId: resultado.estabelecimentoId || estabelecimentoId,
       mesaId: targetMesaId,
-      comandaId: resultado.comandaId || comandaId || undefined,
+      comandaId: finalComandaId || undefined,
       telefone: resultado.telefone,
       clienteId: resultado.cliente?.id,
     });

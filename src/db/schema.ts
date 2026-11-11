@@ -12,6 +12,7 @@ import {
   primaryKey,
   unique,
   index,
+  uniqueIndex,
   boolean,
 } from 'drizzle-orm/pg-core';
 
@@ -90,18 +91,25 @@ export const pontoDePreparo = pgTable('ponto_de_preparo', {
 });
 
 // 3. usuario
-export const usuario = pgTable('usuario', {
-  id: uuid('id').defaultRandom().primaryKey(),
-  estabelecimentoId: uuid('estabelecimento_id')
-    .notNull()
-    .references(() => estabelecimento.id, { onDelete: 'cascade' }),
-  nome: text('nome').notNull(),
-  papel: papelUsuarioEnum('papel').notNull(),
-  celular: text('celular'),
-  email: text('email'),
-  senhaHash: text('senha_hash').notNull().default(''),
-  criadoEm: timestamp('criado_em', { withTimezone: true }).notNull().defaultNow(),
-});
+export const usuario = pgTable(
+  'usuario',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    estabelecimentoId: uuid('estabelecimento_id')
+      .notNull()
+      .references(() => estabelecimento.id, { onDelete: 'cascade' }),
+    nome: text('nome').notNull(),
+    papel: papelUsuarioEnum('papel').notNull(),
+    celular: text('celular'),
+    email: text('email'),
+    senhaHash: text('senha_hash').notNull().default(''),
+    criadoEm: timestamp('criado_em', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('idx_usuario_estabelecimento_email').on(table.estabelecimentoId, table.email),
+    uniqueIndex('idx_usuario_estabelecimento_celular').on(table.estabelecimentoId, table.celular),
+  ]
+);
 
 // 4. mesa
 export const mesa = pgTable(
@@ -161,7 +169,8 @@ export const cliente = pgTable(
     criadoEm: timestamp('criado_em', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    unique().on(table.estabelecimentoId, table.celular),
+    uniqueIndex('idx_cliente_estabelecimento_celular').on(table.estabelecimentoId, table.celular),
+    uniqueIndex('idx_cliente_estabelecimento_email').on(table.estabelecimentoId, table.email),
   ]
 );
 
