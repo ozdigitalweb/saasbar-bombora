@@ -582,7 +582,7 @@ export const api = {
 
   async solicitarCodigoVerificacao(data: {
     estabelecimentoId: string;
-    mesaId?: string;
+    mesaId: string;
     comandaId?: string;
     telefone: string;
     canal?: 'sms' | 'whatsapp';

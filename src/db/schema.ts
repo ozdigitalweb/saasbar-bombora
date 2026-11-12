@@ -170,7 +170,6 @@ export const cliente = pgTable(
   },
   (table) => [
     uniqueIndex('idx_cliente_estabelecimento_celular').on(table.estabelecimentoId, table.celular),
-    uniqueIndex('idx_cliente_estabelecimento_email').on(table.estabelecimentoId, table.email),
   ]
 );
 

@@ -5,7 +5,7 @@ async function verificarDuplicatasEIndices() {
   console.log('=== VERIFICAÇÃO DE DUPLICATAS E STATUS DOS ÍNDICES ÚNICOS ===\n');
 
   // 1. Verificar duplicatas em usuario por email
-  console.log('[1/4] Verificando duplicatas de email em usuario...');
+  console.log('[1/3] Verificando duplicatas de email em usuario...');
   const dupUserEmail = await db.execute(sql`
     SELECT estabelecimento_id, lower(email) as email_lower, count(*) as total
     FROM usuario
@@ -20,7 +20,7 @@ async function verificarDuplicatasEIndices() {
   }
 
   // 2. Verificar duplicatas em usuario por celular
-  console.log('[2/4] Verificando duplicatas de celular em usuario...');
+  console.log('[2/3] Verificando duplicatas de celular em usuario...');
   const dupUserCelular = await db.execute(sql`
     SELECT estabelecimento_id, celular, count(*) as total
     FROM usuario
@@ -34,23 +34,8 @@ async function verificarDuplicatasEIndices() {
     console.log('✓ Nenhuma duplicata de celular em usuario encontrada.');
   }
 
-  // 3. Verificar duplicatas em cliente por email
-  console.log('[3/4] Verificando duplicatas de email em cliente...');
-  const dupClienteEmail = await db.execute(sql`
-    SELECT estabelecimento_id, lower(email) as email_lower, count(*) as total
-    FROM cliente
-    WHERE email IS NOT NULL AND trim(email) != ''
-    GROUP BY estabelecimento_id, lower(email)
-    HAVING count(*) > 1
-  `);
-  if (dupClienteEmail.rows.length > 0) {
-    console.warn('ATENÇÃO: Foram encontradas duplicatas de email em cliente:', dupClienteEmail.rows);
-  } else {
-    console.log('✓ Nenhuma duplicata de email em cliente encontrada.');
-  }
-
-  // 4. Verificar duplicatas em cliente por celular
-  console.log('[4/4] Verificando duplicatas de celular em cliente...');
+  // 3. Verificar duplicatas em cliente por celular (único mantido)
+  console.log('[3/3] Verificando duplicatas de celular em cliente...');
   const dupClienteCelular = await db.execute(sql`
     SELECT estabelecimento_id, celular, count(*) as total
     FROM cliente

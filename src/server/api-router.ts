@@ -427,6 +427,9 @@ apiRouter.post('/usuarios', requireRole(['gerente']), async (req: Request, res: 
     });
     res.status(201).json(created);
   } catch (error: any) {
+    if (error?.status === 409 || error?.message === 'Este celular já está cadastrado' || error?.message === 'Este e-mail já está cadastrado') {
+      return res.status(409).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message || 'Erro ao cadastrar usuário' });
   }
 });
@@ -464,6 +467,9 @@ apiRouter.put('/usuarios/:id', requireRole(['gerente']), async (req: Request, re
     });
     res.json(updated);
   } catch (error: any) {
+    if (error?.status === 409 || error?.message === 'Este celular já está cadastrado' || error?.message === 'Este e-mail já está cadastrado') {
+      return res.status(409).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message || 'Erro ao atualizar usuário' });
   }
 });
@@ -720,6 +726,9 @@ apiRouter.post('/clientes', async (req: Request, res: Response) => {
     });
     res.status(201).json(created);
   } catch (error: any) {
+    if (error?.status === 409 || error?.message === 'Este celular já está cadastrado') {
+      return res.status(409).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message || 'Erro ao cadastrar cliente' });
   }
 });
@@ -739,6 +748,9 @@ apiRouter.put('/clientes/:id', async (req: Request, res: Response) => {
     });
     res.json(updated);
   } catch (error: any) {
+    if (error?.status === 409 || error?.message === 'Este celular já está cadastrado') {
+      return res.status(409).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message || 'Erro ao atualizar cliente' });
   }
 });
@@ -1147,8 +1159,8 @@ apiRouter.get('/cliente/mesa-por-qr', autoatendimentoRateLimiter, async (req: Re
 apiRouter.post('/cliente/solicitar-codigo', autoatendimentoRateLimiter, async (req: Request, res: Response) => {
   try {
     const { estabelecimentoId, mesaId, comandaId, telefone, canal } = req.body;
-    if (!estabelecimentoId || !telefone) {
-      return res.status(400).json({ error: 'estabelecimentoId e telefone são obrigatórios.' });
+    if (!estabelecimentoId || !mesaId || !telefone) {
+      return res.status(400).json({ error: 'estabelecimentoId, mesaId e telefone são obrigatórios.' });
     }
 
     const resultado = await telefoneVerificacaoService.solicitarCodigo({
@@ -1161,10 +1173,10 @@ apiRouter.post('/cliente/solicitar-codigo', autoatendimentoRateLimiter, async (r
     });
 
     const isProduction = process.env.NODE_ENV === 'production';
-    const { codigoDebug, ...respostaCliente } = resultado;
+    const respostaCliente: any = { ...resultado };
     // Em produção, nunca retorna codigoDebug
     if (isProduction) {
-      delete (respostaCliente as any).codigoDebug;
+      delete respostaCliente.codigoDebug;
     }
     res.status(200).json(respostaCliente);
   } catch (error: any) {
@@ -1178,7 +1190,8 @@ apiRouter.post('/cliente/solicitar-codigo', autoatendimentoRateLimiter, async (r
         mensagem: 'Envio de código indisponível no momento. Você pode prosseguir e validar seu pedido presencialmente com o garçom.',
       });
     }
-    res.status(400).json({ error: errMsg || 'Erro ao enviar código de verificação' });
+    const status = error.status || 400;
+    res.status(status).json({ error: errMsg || 'Erro ao enviar código de verificação' });
   }
 });
 
@@ -1251,8 +1264,17 @@ apiRouter.post('/cliente/verificar-codigo', autoatendimentoRateLimiter, async (r
       codigo,
     });
 
-    // Gera token assinado de sessão (curta duração: 2 horas) preso ao estabelecimentoId, mesaId, comandaId e telefone
-    const targetMesaId = mesaId || resultado.mesaId || '';
+    // Se o corpo trouxer outro mesaId, recusa com 400
+    if (mesaId && resultado.mesaId && mesaId !== resultado.mesaId) {
+      return res.status(400).json({ error: 'mesaId divergente da mesa registrada na solicitação de código.' });
+    }
+
+    // O mesaId do token deve vir do registro de verificação gravado em solicitar-codigo, e não do corpo da requisição
+    const targetMesaId = resultado.mesaId;
+    if (!targetMesaId) {
+      return res.status(400).json({ error: 'Nenhuma mesa associada à verificação de código.' });
+    }
+
     const finalComandaId = resultado.comandaId || resolvedComandaId;
     const sessaoToken = generateClientSessionToken({
       estabelecimentoId: resultado.estabelecimentoId || estabelecimentoId,
@@ -1264,12 +1286,14 @@ apiRouter.post('/cliente/verificar-codigo', autoatendimentoRateLimiter, async (r
 
     res.status(200).json({
       ...resultado,
+      mesaId: targetMesaId,
       token: sessaoToken,
       sessaoToken,
     });
   } catch (error: any) {
     console.error('Erro ao verificar código:', error);
-    res.status(400).json({ error: error.message || 'Código de verificação incorreto ou expirado' });
+    const status = error.status || 400;
+    res.status(status).json({ error: error.message || 'Código de verificação incorreto ou expirado' });
   }
 });
 

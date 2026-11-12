@@ -3725,6 +3725,7 @@ async function runTestSuite() {
     const tel15_4 = '11988881504';
     await telefoneVerificacaoService.solicitarCodigo({
       estabelecimentoId: est15A.id,
+      mesaId: mesa15A.id,
       telefone: tel15_4,
     });
 
@@ -3733,6 +3734,7 @@ async function runTestSuite() {
       // Reenvio imediato para o mesmo telefone
       await telefoneVerificacaoService.solicitarCodigo({
         estabelecimentoId: est15A.id,
+        mesaId: mesa15A.id,
         telefone: tel15_4,
       });
     } catch (e: any) {
@@ -3769,6 +3771,7 @@ async function runTestSuite() {
     // 1º Envio (simular criado há 45 min)
     const req15_5A = await telefoneVerificacaoService.solicitarCodigo({
       estabelecimentoId: est15A.id,
+      mesaId: mesa15A.id,
       telefone: tel15_5,
     });
     await db
@@ -3779,6 +3782,7 @@ async function runTestSuite() {
     // 2º Envio (simular criado há 30 min)
     const req15_5B = await telefoneVerificacaoService.solicitarCodigo({
       estabelecimentoId: est15A.id,
+      mesaId: mesa15A.id,
       telefone: tel15_5,
     });
     await db
@@ -3789,6 +3793,7 @@ async function runTestSuite() {
     // 3º Envio (simular criado há 10 min)
     const req15_5C = await telefoneVerificacaoService.solicitarCodigo({
       estabelecimentoId: est15A.id,
+      mesaId: mesa15A.id,
       telefone: tel15_5,
     });
     await db
@@ -3801,6 +3806,7 @@ async function runTestSuite() {
     try {
       await telefoneVerificacaoService.solicitarCodigo({
         estabelecimentoId: est15A.id,
+        mesaId: mesa15A.id,
         telefone: tel15_5,
       });
     } catch (e: any) {
@@ -3833,6 +3839,7 @@ async function runTestSuite() {
     const tel15_6 = '11988881506';
     const req15_6 = await telefoneVerificacaoService.solicitarCodigo({
       estabelecimentoId: est15A.id,
+      mesaId: mesa15A.id,
       telefone: tel15_6,
     });
     const codPuro15_6 = req15_6.codigoDebug!;
@@ -4024,6 +4031,7 @@ async function runTestSuite() {
     // Gera código no Estabelecimento A
     const req15_9 = await telefoneVerificacaoService.solicitarCodigo({
       estabelecimentoId: est15A.id,
+      mesaId: mesa15A.id,
       telefone: tel15_9,
     });
     const cod15_9 = req15_9.codigoDebug!;
@@ -4098,6 +4106,11 @@ async function runTestSuite() {
       nome: `Gerente Seg B ${prefix}`,
       papel: 'gerente',
       senhaHash: hash16,
+    });
+
+    const mesa16A = await mesaService.create({
+      estabelecimentoId: est16A.id,
+      identificador: 'M-16A',
     });
 
     const tokenGerenteA = generateToken({
@@ -4441,6 +4454,7 @@ async function runTestSuite() {
       },
       body: JSON.stringify({
         estabelecimentoId: est16A.id,
+        mesaId: mesa16A.id,
         telefone: telSolicitarProxy,
       }),
     });
@@ -5562,6 +5576,374 @@ async function runTestSuite() {
     server18.close();
   } catch (err: any) {
     console.error('Erro na Seção 18:', err);
+  }
+
+  try {
+    // ==========================================
+    // SEÇÃO 19: REFINAMENTO DE BUSCA, ÍNDICES E DIVERGÊNCIA DE MESA
+    // ==========================================
+    console.log('\n--- EXECUTANDO TESTES DA SEÇÃO 19 (BUSCA EXATA, ÍNDICES E SEGURANÇA DE MESA) ---');
+
+    const server19 = http.createServer(app);
+    await new Promise<void>((resolve) => server19.listen(0, resolve));
+    const port19 = (server19.address() as any).port;
+    const baseUrl19 = `http://127.0.0.1:${port19}/api`;
+
+    const est19A = await estabelecimentoService.create({
+      nome: `Bar Sec19 A ${prefix}`,
+      tipo: 'bar_casa_noturna',
+    });
+    const est19B = await estabelecimentoService.create({
+      nome: `Bar Sec19 B ${prefix}`,
+      tipo: 'bar_casa_noturna',
+    });
+
+    const evt19A = await eventoService.create({
+      estabelecimentoId: est19A.id,
+      nome: `Evento 19A ${prefix}`,
+      dataInicio: new Date(),
+    });
+
+    const mesa19A1 = await mesaService.create({
+      estabelecimentoId: est19A.id,
+      identificador: 'M-19A1',
+    });
+    const mesa19A2 = await mesaService.create({
+      estabelecimentoId: est19A.id,
+      identificador: 'M-19A2',
+    });
+    const mesa19B = await mesaService.create({
+      estabelecimentoId: est19B.id,
+      identificador: 'M-19B',
+    });
+
+    const cmd19A1 = await comandaService.create({
+      eventoId: evt19A.id,
+      tipoAtendimento: 'mesa',
+      mesaId: mesa19A1.id,
+    });
+
+    const senhaGerente19 = await hashPassword('Gerente19Pass!');
+    const uGerente19 = await usuarioService.create({
+      estabelecimentoId: est19A.id,
+      nome: 'Gerente Sec 19',
+      papel: 'gerente',
+      celular: `11966${prefix.slice(-6)}`,
+      email: `gerente19_${prefix}@bar.com`,
+      senhaHash: senhaGerente19,
+    });
+    const tokenGerente19 = generateToken({
+      userId: uGerente19.id,
+      estabelecimentoId: est19A.id,
+      nome: uGerente19.nome,
+      papel: 'gerente',
+    });
+
+    // 19.1: clienteService.findByCelular busca por igualdade exata de 13 dígitos
+    // Dois clientes com o mesmo final de 8 dígitos e DDDs diferentes continuam sendo duas pessoas, e o check-in de um não altera o nome do outro
+    const final8 = prefix.slice(-8);
+    const telSP = `119${final8}`;
+    const telRJ = `219${final8}`;
+
+    const cliSP = await clienteService.create({
+      estabelecimentoId: est19A.id,
+      nome: 'Cliente São Paulo',
+      celular: telSP,
+    });
+    const cliRJ = await clienteService.create({
+      estabelecimentoId: est19A.id,
+      nome: 'Cliente Rio de Janeiro',
+      celular: telRJ,
+    });
+
+    // Busca direta por celular normalizado
+    const foundRJ = await clienteService.findByCelular(telRJ, est19A.id);
+    const foundSP = await clienteService.findByCelular(telSP, est19A.id);
+
+    // findOrCreate / check-in com o número do RJ com novo nome não altera o cliente de SP
+    await clienteService.findOrCreate({
+      estabelecimentoId: est19A.id,
+      nome: 'Cliente RJ Atualizado',
+      celular: telRJ,
+    });
+
+    const cliSPDepois = await clienteService.getById(cliSP.id);
+    const cliRJDepois = await clienteService.getById(cliRJ.id);
+
+    const duasPessoasDistintas = cliSP.id !== cliRJ.id && foundRJ?.id === cliRJ.id && foundSP?.id === cliSP.id;
+    const nomeSPPreservado = cliSPDepois?.nome === 'Cliente São Paulo';
+    const nomeRJAtualizado = cliRJDepois?.nome === 'Cliente RJ Atualizado';
+
+    if (duasPessoasDistintas && nomeSPPreservado && nomeRJAtualizado) {
+      record(
+        '19.1',
+        'Busca Exata de Cliente por Celular',
+        'clienteService.findByCelular usa igualdade exata (13 dígitos) sem comparação de 8 dígitos',
+        'Dois clientes com o mesmo final de 8 dígitos e DDDs diferentes são duas pessoas distintas; check-in de um não altera o outro',
+        'passou',
+        `Cliente SP (${cliSP.id}, ${cliSP.celular}) e Cliente RJ (${cliRJ.id}, ${cliRJ.celular}) mantidos separados. Nome de SP permaneceu intacto.`
+      );
+    } else {
+      record(
+        '19.1',
+        'Busca Exata de Cliente por Celular',
+        'clienteService.findByCelular igualdade exata',
+        'Duas pessoas distintas e nomes preservados',
+        'falhou',
+        `duasPessoasDistintas=${duasPessoasDistintas}, nomeSPPreservado=${nomeSPPreservado}, nomeRJAtualizado=${nomeRJAtualizado}`
+      );
+    }
+
+    // 19.2: Dois clientes com o mesmo e-mail podem existir no mesmo bar (índice único de email removido, único de celular mantido)
+    const emailCompartilhado = `casal_${prefix}@familia.com`;
+    const resCliEmail1 = await fetch(`${baseUrl19}/clientes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenGerente19}` },
+      body: JSON.stringify({
+        estabelecimentoId: est19A.id,
+        nome: 'Pessoa Um (Email Compartilhado)',
+        celular: `11981${prefix.slice(-6)}`,
+        email: emailCompartilhado,
+      }),
+    });
+    const resCliEmail2 = await fetch(`${baseUrl19}/clientes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenGerente19}` },
+      body: JSON.stringify({
+        estabelecimentoId: est19A.id,
+        nome: 'Pessoa Dois (Email Compartilhado)',
+        celular: `11982${prefix.slice(-6)}`,
+        email: emailCompartilhado,
+      }),
+    });
+
+    const cli1Ok = resCliEmail1.status === 201;
+    const cli2Ok = resCliEmail2.status === 201;
+
+    if (cli1Ok && cli2Ok) {
+      record(
+        '19.2',
+        'Índices de Cliente',
+        'Dois clientes com o mesmo e-mail podem existir no mesmo bar',
+        'idx_cliente_estabelecimento_email removido; clientes com mesmo e-mail e celulares distintos cadastram com sucesso (HTTP 201)',
+        'passou',
+        `Ambos clientes com o email "${emailCompartilhado}" foram criados com sucesso com HTTP 201.`
+      );
+    } else {
+      record(
+        '19.2',
+        'Índices de Cliente',
+        'Dois clientes com o mesmo e-mail no mesmo bar',
+        'HTTP 201 para ambos',
+        'falhou',
+        `status1=${resCliEmail1.status}, status2=${resCliEmail2.status}`
+      );
+    }
+
+    // 19.3: Cadastro e edição de usuário e cliente: duplicatas retornam HTTP 409 com mensagem clara
+    // 19.3.1: Usuário - email duplicado no estabelecimento -> 409 "Este e-mail já está cadastrado"
+    const resUserDupEmail = await fetch(`${baseUrl19}/usuarios`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenGerente19}` },
+      body: JSON.stringify({
+        estabelecimentoId: est19A.id,
+        nome: 'Outro Usuario Email Repetido',
+        papel: 'garcom',
+        senha: 'SenhaSegura123!',
+        email: uGerente19.email,
+        celular: `11955${prefix.slice(-6)}`,
+      }),
+    });
+    const jsonUserDupEmail = await resUserDupEmail.json();
+    const userEmail409 = resUserDupEmail.status === 409 && jsonUserDupEmail.error === 'Este e-mail já está cadastrado';
+
+    // 19.3.2: Usuário - celular duplicado no estabelecimento -> 409 "Este celular já está cadastrado"
+    const resUserDupCel = await fetch(`${baseUrl19}/usuarios`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenGerente19}` },
+      body: JSON.stringify({
+        estabelecimentoId: est19A.id,
+        nome: 'Outro Usuario Celular Repetido',
+        papel: 'garcom',
+        senha: 'SenhaSegura123!',
+        email: `novo_usuario_${prefix}@bar.com`,
+        celular: uGerente19.celular,
+      }),
+    });
+    const jsonUserDupCel = await resUserDupCel.json();
+    const userCel409 = resUserDupCel.status === 409 && jsonUserDupCel.error === 'Este celular já está cadastrado';
+
+    // 19.3.3: Usuário - edição (PUT) com email ou celular já existente em outro usuário -> 409
+    const senhaU2 = await hashPassword('SenhaSegura456!');
+    const uSec19_2 = await usuarioService.create({
+      estabelecimentoId: est19A.id,
+      nome: 'Usuario Para Edicao 19',
+      papel: 'garcom',
+      celular: `11944${prefix.slice(-6)}`,
+      email: `u2_edit_${prefix}@bar.com`,
+      senhaHash: senhaU2,
+    });
+
+    const resUserPutDupEmail = await fetch(`${baseUrl19}/usuarios/${uSec19_2.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenGerente19}` },
+      body: JSON.stringify({ email: uGerente19.email }),
+    });
+    const jsonUserPutDupEmail = await resUserPutDupEmail.json();
+    const userPutEmail409 = resUserPutDupEmail.status === 409 && jsonUserPutDupEmail.error === 'Este e-mail já está cadastrado';
+
+    // 19.3.4: Cliente - cadastro e edição com celular duplicado -> 409 "Este celular já está cadastrado"
+    const resCliDupCel = await fetch(`${baseUrl19}/clientes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenGerente19}` },
+      body: JSON.stringify({
+        estabelecimentoId: est19A.id,
+        nome: 'Tentativa Cliente Celular Duplicado',
+        celular: cliSP.celular,
+      }),
+    });
+    const jsonCliDupCel = await resCliDupCel.json();
+    const cliCel409 = resCliDupCel.status === 409 && jsonCliDupCel.error === 'Este celular já está cadastrado';
+
+    const resCliPutDupCel = await fetch(`${baseUrl19}/clientes/${cliRJ.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenGerente19}` },
+      body: JSON.stringify({ celular: cliSP.celular }),
+    });
+    const jsonCliPutDupCel = await resCliPutDupCel.json();
+    const cliPutCel409 = resCliPutDupCel.status === 409 && jsonCliPutDupCel.error === 'Este celular já está cadastrado';
+
+    if (userEmail409 && userCel409 && userPutEmail409 && cliCel409 && cliPutCel409) {
+      record(
+        '19.3',
+        'Mensagens Claras de Conflito (409)',
+        'Cadastro e edição de usuário e cliente devolvem 409 com mensagem clara sem erro genérico',
+        'Retorna HTTP 409 com "Este celular já está cadastrado" ou "Este e-mail já está cadastrado"',
+        'passou',
+        'Todas as tentativas de cadastro e edição duplicada retornaram HTTP 409 com mensagens específicas exatas.'
+      );
+    } else {
+      record(
+        '19.3',
+        'Mensagens Claras de Conflito (409)',
+        'Cadastro e edição duplicados retornam 409 com mensagem clara',
+        'HTTP 409 com mensagens claras',
+        'falhou',
+        `userEmail409=${userEmail409}, userCel409=${userCel409}, userPutEmail409=${userPutEmail409}, cliCel409=${cliCel409}, cliPutCel409=${cliPutCel409}`
+      );
+    }
+
+    // 19.4: /cliente/solicitar-codigo e /cliente/verificar-codigo com segurança de mesa
+    // 19.4.1: solicitar-codigo sem mesaId -> 400
+    const resSolicitarSemMesa = await fetch(`${baseUrl19}/cliente/solicitar-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estabelecimentoId: est19A.id,
+        telefone: `11971${prefix.slice(-6)}`,
+      }),
+    });
+    const solicitarSemMesa400 = resSolicitarSemMesa.status === 400;
+
+    // 19.4.2: solicitar-codigo com mesaId de outro estabelecimento -> 400
+    const resSolicitarMesaOutroEst = await fetch(`${baseUrl19}/cliente/solicitar-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estabelecimentoId: est19A.id,
+        mesaId: mesa19B.id,
+        telefone: `11971${prefix.slice(-6)}`,
+      }),
+    });
+    const solicitarMesaOutroEst400 = resSolicitarMesaOutroEst.status === 400;
+
+    // 19.4.3: solicitar-codigo com comanda de outra mesa -> 400
+    const resSolicitarCmdOutraMesa = await fetch(`${baseUrl19}/cliente/solicitar-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estabelecimentoId: est19A.id,
+        mesaId: mesa19A2.id,
+        comandaId: cmd19A1.id,
+        telefone: `11971${prefix.slice(-6)}`,
+      }),
+    });
+    const solicitarCmdOutraMesa400 = resSolicitarCmdOutraMesa.status === 400;
+
+    // 19.4.4: solicitar-codigo válido na Mesa A1
+    const telVerifMesa = `11972${prefix.slice(-6)}`;
+    const resSolicitarValido = await fetch(`${baseUrl19}/cliente/solicitar-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estabelecimentoId: est19A.id,
+        mesaId: mesa19A1.id,
+        comandaId: cmd19A1.id,
+        telefone: telVerifMesa,
+      }),
+    });
+    const jsonSolicitarValido = await resSolicitarValido.json();
+    const otpDebug = jsonSolicitarValido.codigoDebug;
+
+    // 19.4.5: verificar-codigo com mesaId divergente (corpo envia mesa19A2, mas solicitação foi na mesa19A1) -> 400
+    const resVerifMesaDivergente = await fetch(`${baseUrl19}/cliente/verificar-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estabelecimentoId: est19A.id,
+        mesaId: mesa19A2.id,
+        telefone: telVerifMesa,
+        codigo: otpDebug,
+      }),
+    });
+    const jsonVerifMesaDivergente = await resVerifMesaDivergente.json();
+    const verifDivergente400 = resVerifMesaDivergente.status === 400 &&
+      jsonVerifMesaDivergente.error.includes('mesaId divergente');
+
+    // 19.4.6: verificar-codigo sem mesaId no corpo -> deve aprovar e token DEVE conter mesa19A1 vindo do banco
+    const resVerifValido = await fetch(`${baseUrl19}/cliente/verificar-codigo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estabelecimentoId: est19A.id,
+        telefone: telVerifMesa,
+        codigo: otpDebug,
+      }),
+    });
+    const jsonVerifValido = await resVerifValido.json();
+    const tokenDecodificadoMesa = verifyClientSessionToken(jsonVerifValido.token);
+    const tokenMesaPresoCorreto = tokenDecodificadoMesa?.mesaId === mesa19A1.id;
+
+    if (
+      solicitarSemMesa400 &&
+      solicitarMesaOutroEst400 &&
+      solicitarCmdOutraMesa400 &&
+      verifDivergente400 &&
+      resVerifValido.status === 200 &&
+      tokenMesaPresoCorreto
+    ) {
+      record(
+        '19.4',
+        'Integridade da Mesa no Fluxo de Código',
+        'mesaId do token vem estritamente do registro de solicitação; divergência é recusada com 400',
+        'solicitar-codigo exige mesaId válida; verificar-codigo rejeita mesaId divergente com 400; token assinado recebe mesaId da verificação gravada',
+        'passou',
+        `Validações completas: sem mesa=${solicitarSemMesa400}, outro est=${solicitarMesaOutroEst400}, comanda errada=${solicitarCmdOutraMesa400}, divergência 400=${verifDivergente400}, token gerado com mesaId original ${tokenDecodificadoMesa?.mesaId}.`
+      );
+    } else {
+      record(
+        '19.4',
+        'Integridade da Mesa no Fluxo de Código',
+        'mesaId do token vem do registro e divergência é 400',
+        'Validação completa e token com mesaId do registro',
+        'falhou',
+        `solicitarSemMesa400=${solicitarSemMesa400}, solicitarMesaOutroEst400=${solicitarMesaOutroEst400}, solicitarCmdOutraMesa400=${solicitarCmdOutraMesa400}, verifDivergente400=${verifDivergente400}, statusVerif=${resVerifValido.status}, tokenMesaPresoCorreto=${tokenMesaPresoCorreto}`
+      );
+    }
+
+    server19.close();
+  } catch (err: any) {
+    console.error('Erro na Seção 19:', err);
   }
 
   console.log('\n====================================================');

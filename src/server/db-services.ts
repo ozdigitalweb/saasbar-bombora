@@ -271,19 +271,66 @@ export const usuarioService = {
       if (!data.senhaHash || typeof data.senhaHash !== 'string' || data.senhaHash.trim().length === 0) {
         throw new Error('senhaHash é obrigatório para cadastro de usuário.');
       }
+
+      const normCel = data.celular ? normalizarTelefone(data.celular) : null;
+      const lowerEmail = data.email ? data.email.trim().toLowerCase() : null;
+
+      if (lowerEmail) {
+        const dupEmail = await db
+          .select({ id: usuario.id })
+          .from(usuario)
+          .where(and(eq(usuario.estabelecimentoId, data.estabelecimentoId), eq(usuario.email, lowerEmail)))
+          .limit(1);
+        if (dupEmail.length > 0) {
+          const err: any = new Error('Este e-mail já está cadastrado');
+          err.status = 409;
+          throw err;
+        }
+      }
+
+      if (normCel) {
+        const dupCel = await db
+          .select({ id: usuario.id })
+          .from(usuario)
+          .where(and(eq(usuario.estabelecimentoId, data.estabelecimentoId), eq(usuario.celular, normCel)))
+          .limit(1);
+        if (dupCel.length > 0) {
+          const err: any = new Error('Este celular já está cadastrado');
+          err.status = 409;
+          throw err;
+        }
+      }
+
       const rows = await db
         .insert(usuario)
         .values({
           estabelecimentoId: data.estabelecimentoId,
           nome: data.nome,
           papel: data.papel,
-          celular: data.celular ? normalizarTelefone(data.celular) : null,
-          email: data.email ? data.email.trim().toLowerCase() : null,
+          celular: normCel,
+          email: lowerEmail,
           senhaHash: data.senhaHash,
         })
         .returning();
       return sanitizeUsuario(rows[0])!;
     } catch (error: any) {
+      if (error?.status === 409) {
+        throw error;
+      }
+      const msg = error?.message || '';
+      const detail = error?.detail || '';
+      if (error?.code === '23505' || msg.includes('unique') || msg.includes('duplicate key')) {
+        if (msg.includes('celular') || detail.includes('celular')) {
+          const err: any = new Error('Este celular já está cadastrado');
+          err.status = 409;
+          throw err;
+        }
+        if (msg.includes('email') || detail.includes('email')) {
+          const err: any = new Error('Este e-mail já está cadastrado');
+          err.status = 409;
+          throw err;
+        }
+      }
       console.error('Error in usuarioService.create:', error);
       if (error?.message?.includes('senhaHash é obrigatório')) {
         throw error;
@@ -303,15 +350,44 @@ export const usuarioService = {
     }
   ) {
     try {
+      const existingUser = await db.select().from(usuario).where(eq(usuario.id, id)).limit(1);
+      if (!existingUser[0]) return null;
+      const estId = existingUser[0].estabelecimentoId;
+
+      const normCel = data.celular !== undefined ? (data.celular ? normalizarTelefone(data.celular) : null) : undefined;
+      const lowerEmail = data.email !== undefined ? (data.email ? data.email.trim().toLowerCase() : null) : undefined;
+
+      if (lowerEmail && lowerEmail !== (existingUser[0].email || '').toLowerCase()) {
+        const dupEmail = await db
+          .select({ id: usuario.id })
+          .from(usuario)
+          .where(and(eq(usuario.estabelecimentoId, estId), eq(usuario.email, lowerEmail), ne(usuario.id, id)))
+          .limit(1);
+        if (dupEmail.length > 0) {
+          const err: any = new Error('Este e-mail já está cadastrado');
+          err.status = 409;
+          throw err;
+        }
+      }
+
+      if (normCel && normCel !== existingUser[0].celular) {
+        const dupCel = await db
+          .select({ id: usuario.id })
+          .from(usuario)
+          .where(and(eq(usuario.estabelecimentoId, estId), eq(usuario.celular, normCel), ne(usuario.id, id)))
+          .limit(1);
+        if (dupCel.length > 0) {
+          const err: any = new Error('Este celular já está cadastrado');
+          err.status = 409;
+          throw err;
+        }
+      }
+
       const updateData: any = {};
       if (data.nome !== undefined) updateData.nome = data.nome;
       if (data.papel !== undefined) updateData.papel = data.papel;
-      if (data.celular !== undefined) {
-        updateData.celular = data.celular ? normalizarTelefone(data.celular) : null;
-      }
-      if (data.email !== undefined) {
-        updateData.email = data.email ? data.email.trim().toLowerCase() : null;
-      }
+      if (normCel !== undefined) updateData.celular = normCel;
+      if (lowerEmail !== undefined) updateData.email = lowerEmail;
       if (data.senhaHash !== undefined) updateData.senhaHash = data.senhaHash;
 
       const rows = await db
@@ -320,7 +396,24 @@ export const usuarioService = {
         .where(eq(usuario.id, id))
         .returning();
       return sanitizeUsuario(rows[0]) || null;
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.status === 409) {
+        throw error;
+      }
+      const msg = error?.message || '';
+      const detail = error?.detail || '';
+      if (error?.code === '23505' || msg.includes('unique') || msg.includes('duplicate key')) {
+        if (msg.includes('celular') || detail.includes('celular')) {
+          const err: any = new Error('Este celular já está cadastrado');
+          err.status = 409;
+          throw err;
+        }
+        if (msg.includes('email') || detail.includes('email')) {
+          const err: any = new Error('Este e-mail já está cadastrado');
+          err.status = 409;
+          throw err;
+        }
+      }
       console.error(`Error in usuarioService.update(${id}):`, error);
       throw new Error('Falha ao atualizar usuário.', { cause: error });
     }
@@ -580,23 +673,17 @@ export const clienteService = {
   async findByCelular(celular: string, estabelecimentoId?: string) {
     try {
       const normalizedPhone = normalizarTelefone(celular);
-      const cleanPhone = (celular || '').replace(/\D/g, '');
-      const query = db.select().from(cliente);
-      const conditions = [];
+      if (!normalizedPhone) return null;
+      const conditions = [eq(cliente.celular, normalizedPhone)];
       if (estabelecimentoId) {
         conditions.push(eq(cliente.estabelecimentoId, estabelecimentoId));
       }
-      const all = await query.where(conditions.length > 0 ? and(...conditions) : undefined);
-      const match = all.find((c) => {
-        const cPhone = (c.celular || '').replace(/\D/g, '');
-        return (
-          cPhone === normalizedPhone ||
-          cPhone === cleanPhone ||
-          (cleanPhone.length >= 8 && cPhone.endsWith(cleanPhone)) ||
-          (normalizedPhone.length >= 8 && cPhone.endsWith(normalizedPhone.slice(-8)))
-        );
-      });
-      return match || null;
+      const rows = await db
+        .select()
+        .from(cliente)
+        .where(and(...conditions))
+        .limit(1);
+      return rows[0] || null;
     } catch (error) {
       console.error('Error in clienteService.findByCelular:', error);
       throw new Error('Falha ao buscar cliente por celular.', { cause: error });
@@ -642,6 +729,22 @@ export const clienteService = {
   }) {
     try {
       const normalizedPhone = normalizarTelefone(data.celular);
+      if (!normalizedPhone) {
+        throw new Error('Celular inválido.');
+      }
+
+      // Validação prévia de celular duplicado no estabelecimento
+      const dup = await db
+        .select({ id: cliente.id })
+        .from(cliente)
+        .where(and(eq(cliente.estabelecimentoId, data.estabelecimentoId), eq(cliente.celular, normalizedPhone)))
+        .limit(1);
+      if (dup.length > 0) {
+        const err: any = new Error('Este celular já está cadastrado');
+        err.status = 409;
+        throw err;
+      }
+
       const rows = await db
         .insert(cliente)
         .values({
@@ -652,7 +755,17 @@ export const clienteService = {
         })
         .returning();
       return rows[0];
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.status === 409) {
+        throw error;
+      }
+      const msg = error?.message || '';
+      const detail = error?.detail || '';
+      if (error?.code === '23505' || msg.includes('unique') || msg.includes('duplicate key') || msg.includes('celular') || detail.includes('celular')) {
+        const err: any = new Error('Este celular já está cadastrado');
+        err.status = 409;
+        throw err;
+      }
       console.error('Error in clienteService.create:', error);
       throw new Error('Falha ao cadastrar cliente.', { cause: error });
     }
@@ -663,11 +776,27 @@ export const clienteService = {
     data: { nome?: string; celular?: string; email?: string }
   ) {
     try {
+      const existing = await db.select().from(cliente).where(eq(cliente.id, id)).limit(1);
+      if (!existing[0]) return null;
+      const estId = existing[0].estabelecimentoId;
+
+      const normCel = data.celular !== undefined ? (data.celular ? normalizarTelefone(data.celular) : data.celular) : undefined;
+      if (normCel && normCel !== existing[0].celular) {
+        const dup = await db
+          .select({ id: cliente.id })
+          .from(cliente)
+          .where(and(eq(cliente.estabelecimentoId, estId), eq(cliente.celular, normCel), ne(cliente.id, id)))
+          .limit(1);
+        if (dup.length > 0) {
+          const err: any = new Error('Este celular já está cadastrado');
+          err.status = 409;
+          throw err;
+        }
+      }
+
       const updateData: any = {};
       if (data.nome !== undefined) updateData.nome = data.nome;
-      if (data.celular !== undefined) {
-        updateData.celular = data.celular ? normalizarTelefone(data.celular) : data.celular;
-      }
+      if (normCel !== undefined) updateData.celular = normCel;
       if (data.email !== undefined) {
         updateData.email = data.email ? data.email.trim().toLowerCase() : null;
       }
@@ -677,7 +806,17 @@ export const clienteService = {
         .where(eq(cliente.id, id))
         .returning();
       return rows[0] || null;
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.status === 409) {
+        throw error;
+      }
+      const msg = error?.message || '';
+      const detail = error?.detail || '';
+      if (error?.code === '23505' || msg.includes('unique') || msg.includes('duplicate key') || msg.includes('celular') || detail.includes('celular')) {
+        const err: any = new Error('Este celular já está cadastrado');
+        err.status = 409;
+        throw err;
+      }
       console.error(`Error in clienteService.update(${id}):`, error);
       throw new Error('Falha ao atualizar cliente.', { cause: error });
     }
@@ -4723,13 +4862,18 @@ export const telefoneVerificacaoService = {
    */
   async solicitarCodigo(data: {
     estabelecimentoId: string;
-    mesaId?: string;
+    mesaId: string;
     comandaId?: string;
     telefone: string;
     canal?: 'sms' | 'whatsapp';
     ip?: string;
   }) {
     try {
+      if (!data.mesaId || typeof data.mesaId !== 'string' || !data.mesaId.trim()) {
+        const err: any = new Error('mesaId é obrigatório para solicitar código.');
+        err.status = 400;
+        throw err;
+      }
       const telNormalizado = normalizarTelefone(data.telefone);
       if (!telNormalizado || telNormalizado.length < 10) {
         throw new Error('Número de telefone inválido. Informe DDD + número (ex: 11988880001).');
@@ -4741,7 +4885,42 @@ export const telefoneVerificacaoService = {
         .from(estabelecimento)
         .where(eq(estabelecimento.id, data.estabelecimentoId))
         .limit(1);
-      if (!est[0]) throw new Error('Estabelecimento não encontrado.');
+      if (!est[0]) {
+        const err: any = new Error('Estabelecimento não encontrado.');
+        err.status = 404;
+        throw err;
+      }
+
+      // Validar que mesaId pertence ao estabelecimentoId informado
+      const targetMesa = await db
+        .select()
+        .from(mesa)
+        .where(and(eq(mesa.id, data.mesaId), eq(mesa.estabelecimentoId, data.estabelecimentoId)))
+        .limit(1);
+      if (!targetMesa[0]) {
+        const err: any = new Error('Mesa não encontrada para este estabelecimento.');
+        err.status = 400;
+        throw err;
+      }
+
+      // Validar que comandaId (se informado) pertence a esta mesa e a este estabelecimento
+      if (data.comandaId) {
+        const targetComanda = await db
+          .select()
+          .from(comanda)
+          .where(
+            and(
+              eq(comanda.id, data.comandaId),
+              eq(comanda.mesaId, data.mesaId)
+            )
+          )
+          .limit(1);
+        if (!targetComanda[0]) {
+          const err: any = new Error('comandaId informado não pertence a esta mesa ou estabelecimento.');
+          err.status = 400;
+          throw err;
+        }
+      }
 
       const canalEfetivo: 'sms' | 'whatsapp' =
         data.canal || (est[0].canalVerificacaoPadrao as 'sms' | 'whatsapp') || 'sms';
@@ -4923,6 +5102,13 @@ export const telefoneVerificacaoService = {
 
       const verif = registros[0];
 
+      // Se o corpo trouxer outro mesaId, recusa com 400
+      if (data.mesaId && verif.mesaId && data.mesaId !== verif.mesaId) {
+        const err: any = new Error('mesaId divergente da mesa registrada na solicitação de código.');
+        err.status = 400;
+        throw err;
+      }
+
       // Verificar se já está bloqueado por excesso de tentativas
       if (verif.status === 'bloqueado' || verif.tentativas >= 3) {
         throw new Error(
@@ -4987,19 +5173,22 @@ export const telefoneVerificacaoService = {
         })
         .where(eq(telefoneVerificacao.id, verif.id));
 
-      // Atualizar comanda da mesa: descobre a comanda aberta da mesa e valida contra divergência
+      // Atualizar comanda da mesa: usa mesaId do registro de verificação
+      const mesaEfetivaId = verif.mesaId || data.mesaId;
       let comandaAtualizadaId: string | undefined = undefined;
-      if (data.mesaId) {
+      if (mesaEfetivaId) {
         // Encontrar comanda aberta da mesa
         const cmdMesa = await db
           .select({ id: comanda.id })
           .from(comanda)
-          .where(and(eq(comanda.mesaId, data.mesaId), eq(comanda.status, 'aberta')))
+          .where(and(eq(comanda.mesaId, mesaEfetivaId), eq(comanda.status, 'aberta')))
           .orderBy(desc(comanda.abertaEm))
           .limit(1);
         if (cmdMesa[0]) comandaAtualizadaId = cmdMesa[0].id;
         if (data.comandaId && comandaAtualizadaId && data.comandaId !== comandaAtualizadaId) {
-          throw new Error('comandaId fornecido não pertence a esta mesa.');
+          const err: any = new Error('comandaId fornecido não pertence a esta mesa.');
+          err.status = 400;
+          throw err;
         }
       } else if (data.comandaId || verif.comandaId) {
         comandaAtualizadaId = data.comandaId || verif.comandaId || undefined;
@@ -5042,7 +5231,7 @@ export const telefoneVerificacaoService = {
         sucesso: true,
         verificado: true,
         estabelecimentoId: data.estabelecimentoId,
-        mesaId: data.mesaId || verif.mesaId || null,
+        mesaId: verif.mesaId || null,
         comandaId: comandaAtualizadaId || null,
         telefone: telNormalizado,
         telefoneMascarado: mascararTelefone(telNormalizado),
